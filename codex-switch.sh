@@ -121,7 +121,7 @@ echo "改写历史会话模型名（解决续聊 compact 钉死模型名问题�
 # （在 codex 0.153.4 实测确认）。这里把历史里的模型名统一改写成目标供应商
 # 的模型名。只动模型归属元数据，会话内容不受影响；每个文件首次改写前留 .bak-model。
 python3 - "$MODE" "$CODEX_HOME" "$SINCE_MODEL" "$DEF_MODEL" <<'PYEOF'
-import os, re, sys, shutil
+import json, os, re, sys, shutil
 
 mode, home, since, default = sys.argv[1], sys.argv[2], float(sys.argv[3]), sys.argv[4]
 # 各供应商认识的模型名（不在白名单里的会被改写成默认名，按需修改）
@@ -131,7 +131,31 @@ cfg = {
     'kimi':     re.compile(r'^(kimi-|k3)'),
 }
 keep = cfg[mode]
-pat = re.compile(r'"model":"([^"]+)"')
+paths = {
+    'session_meta': [('base_instructions', 'provenance', 'model')],
+    'world_state': [('state', 'model'), ('state', 'collaboration_mode', 'model')],
+    'turn_context': [('model',), ('collaboration_mode', 'settings', 'model')],
+    'event_msg': [('thread_settings', 'model'), ('thread_settings', 'collaboration_mode', 'settings', 'model')],
+}
+
+def rewrite(line):
+    try:
+        item = json.loads(line)
+    except (ValueError, TypeError):
+        return line, set()
+    if not isinstance(item, dict):
+        return line, set()
+    names = set()
+    for path in paths.get(item.get('type'), ()):
+        node = item.get('payload')
+        for part in path[:-1]:
+            node = node.get(part) if isinstance(node, dict) else None
+        name = node.get(path[-1]) if isinstance(node, dict) else None
+        if isinstance(name, str) and not keep.match(name):
+            names.add(name)
+            node[path[-1]] = default
+    return (json.dumps(item, ensure_ascii=False, separators=(',', ':')) + '\n', names) if names else (line, names)
+
 roots = [os.path.join(home, 'sessions'), os.path.join(home, 'archived_sessions')]
 changed_files, changed_names, changed_paths = 0, set(), []
 
@@ -148,33 +172,22 @@ for root in roots:
                     continue  # 增量：上次处理后未变动过
             except OSError:
                 continue
-            # 先流式探测是否需要改写（只读不写），需要才流式重写
-            def repl(m):
-                name = m.group(1)
-                if keep.match(name):
-                    return m.group(0)
-                changed_names.add(name)
-                return f'"model":"{default}"'
             try:
-                need = False
-                with open(p, 'r', encoding='utf-8') as fh:
-                    for line in fh:
-                        for m in pat.finditer(line):
-                            if not keep.match(m.group(1)):
-                                need = True
-                                break
-                        if need:
-                            break
-                if not need:
-                    continue
                 tmp = p + '.tmp-switch'
+                file_names = set()
                 with open(p, 'r', encoding='utf-8') as fin, open(tmp, 'w', encoding='utf-8') as fout:
                     for line in fin:
-                        fout.write(pat.sub(repl, line))
+                        rewritten, names = rewrite(line)
+                        fout.write(rewritten)
+                        file_names.update(names)
+                if not file_names:
+                    os.remove(tmp)
+                    continue
                 bak = p + '.bak-model'
                 if not os.path.exists(bak):
                     shutil.copy(p, bak)  # 只保留首次备份，避免覆盖原始版本
                 os.replace(tmp, p)
+                changed_names.update(file_names)
                 changed_files += 1
                 changed_paths.append(p)
             except (OSError, UnicodeDecodeError):
