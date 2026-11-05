@@ -1,6 +1,6 @@
 # codex-switch
 
-> 此 fork 在 Codex 0.166.0-alpha.6 上仍属实验状态：目前只用隔离测试数据验证了切换和历史改写，尚未验证真实 DeepSeek/OpenAI 双向续聊或桌面端兼容性。切换会覆盖整个配置并改写历史；使用前请单独完整备份 `~/.codex`，不要把 API 密钥提交到公开仓库。
+> 此 fork 在 Codex 0.166.0-alpha.6 上仍属实验状态：隔离 CLI 测试中，DeepSeek 真实会话切到 OpenAI 配置再切回 DeepSeek 后能续聊并保留上下文；隔离的 ChatGPT 订阅请求超时，真实 DeepSeek/OpenAI 双向续聊和桌面端兼容性尚未验证。切换会覆盖整个配置并改写历史；使用前请单独完整备份 `~/.codex`，不要把 API 密钥提交到公开仓库。
 >
 > DeepSeek 默认模型改为官方当前的 `deepseek-flash`；会话默认模型和推理强度读取对应配置模板。切换供应商会重新扫描全部历史，同一供应商重复执行仍按增量处理。上一次配置备份在 `config.toml.bak-switch`，再次切换会覆盖此备份。
 
