@@ -18,7 +18,7 @@ SHIM_LABEL="${CODEX_SWITCH_SHIM_LABEL:-com.codexswitch.schema-shim-kimi}"
 
 # Codex 应用与 CLI 路径（默认 ChatGPT 桌面应用内置的 codex）
 CODEX_APP="${CODEX_SWITCH_APP:-ChatGPT}"
-CODEX_CLI="${CODEX_SWITCH_CLI:-/Applications/ChatGPT.app/Contents/Resources/codex}"
+CODEX_CLI="${CODEX_SWITCH_CLI:-/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex}"
 
 if [ "$MODE" != "openai" ] && [ "$MODE" != "deepseek" ] && [ "$MODE" != "kimi" ]; then
   echo "用法: $0 openai|deepseek|kimi"; exit 1
@@ -40,6 +40,7 @@ if [ "$MODE" = "kimi" ]; then
 fi
 
 echo "写入 $MODE 配置..."
+[ ! -f "$CODEX_HOME/config.toml" ] || cp -p "$CODEX_HOME/config.toml" "$CODEX_HOME/config.toml.bak-switch"
 cp "$DIR/config-$MODE.toml" "$CODEX_HOME/config.toml"
 
 echo "同步会话显示标记与默认模型..."
@@ -51,14 +52,25 @@ if [ "$MODE" = "openai" ]; then
 else
   FROM="openai"; TO="custom"
 fi
-case "$MODE" in
-  openai)   DEF_MODEL="gpt-5.6-terra" ;;
-  kimi)     DEF_MODEL="k3" ;;
-  deepseek) DEF_MODEL="deepseek-v4-flash" ;;
-esac
-python3 - "$CODEX_HOME" "$FROM" "$TO" "$DEF_MODEL" <<'PYEOF'
+DEF_MODEL=$(python3 - "$DIR/config-$MODE.toml" <<'PYEOF'
+import re, sys
+with open(sys.argv[1], encoding='utf-8') as f:
+    match = re.search(r'^model\s*=\s*"([^"\n]+)"', f.read(), re.M)
+if not match:
+    raise SystemExit('配置中没有 model')
+print(match.group(1))
+PYEOF
+)
+DEF_EFFORT=$(python3 - "$DIR/config-$MODE.toml" <<'PYEOF'
+import re, sys
+with open(sys.argv[1], encoding='utf-8') as f:
+    match = re.search(r'^model_reasoning_effort\s*=\s*"([^"\n]+)"', f.read(), re.M)
+print(match.group(1) if match else 'medium')
+PYEOF
+)
+python3 - "$CODEX_HOME" "$FROM" "$TO" "$DEF_MODEL" "$DEF_EFFORT" <<'PYEOF'
 import sqlite3, sys, os, shutil
-home, frm, to, model = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+home, frm, to, model, effort = sys.argv[1:]
 db = os.path.join(home, 'state_5.sqlite')
 if not os.path.exists(db):
     print("未找到 state_5.sqlite，跳过"); raise SystemExit
@@ -66,8 +78,8 @@ shutil.copy(db, db + '.bak-switch')
 con = sqlite3.connect(db)
 cur = con.execute("update threads set model_provider=? where model_provider=?", (to, frm))
 print(f"已更新 {cur.rowcount} 条会话标记: {frm} -> {to}")
-cur2 = con.execute("update threads set model=?, reasoning_effort='medium'", (model,))
-print(f"已预设 {cur2.rowcount} 条会话的默认模型: {model}（强度 medium）")
+cur2 = con.execute("update threads set model=?, reasoning_effort=?", (model, effort))
+print(f"已预设 {cur2.rowcount} 条会话的默认模型: {model}（强度 {effort}）")
 con.commit(); con.close()
 PYEOF
 
@@ -97,6 +109,10 @@ MARKER_MODEL="$CODEX_HOME/.switch-rewrite-marker-model"
 MARKER_REASONING="$CODEX_HOME/.switch-rewrite-marker-reasoning"
 SINCE_MODEL=$(cat "$MARKER_MODEL" 2>/dev/null || echo 0)
 SINCE_REASONING=$(cat "$MARKER_REASONING" 2>/dev/null || echo 0)
+# 每次切换供应商都必须重新扫描：未修改的旧会话也可能属于另一供应商。
+if [ "$(cat "$CODEX_HOME/.switch-model-mode" 2>/dev/null || true)" != "$MODE:$DEF_MODEL" ]; then
+  SINCE_MODEL=0
+fi
 NOW_TS=$(python3 -c 'import time; print(time.time())')
 
 echo "改写历史会话模型名（解决续聊 compact 钉死模型名问题）..."
@@ -104,17 +120,17 @@ echo "改写历史会话模型名（解决续聊 compact 钉死模型名问题�
 # 与当前配置无关。跨供应商续聊时对方 API 不认识该名字会报 invalid_request_error
 # （在 codex 0.153.4 实测确认）。这里把历史里的模型名统一改写成目标供应商
 # 的模型名。只动模型归属元数据，会话内容不受影响；每个文件首次改写前留 .bak-model。
-python3 - "$MODE" "$CODEX_HOME" "$SINCE_MODEL" <<'PYEOF'
+python3 - "$MODE" "$CODEX_HOME" "$SINCE_MODEL" "$DEF_MODEL" <<'PYEOF'
 import os, re, sys, shutil
 
-mode, home, since = sys.argv[1], sys.argv[2], float(sys.argv[3])
+mode, home, since, default = sys.argv[1], sys.argv[2], float(sys.argv[3]), sys.argv[4]
 # 各供应商认识的模型名（不在白名单里的会被改写成默认名，按需修改）
 cfg = {
-    'openai':   (re.compile(r'^gpt-'), 'gpt-5.6-terra'),
-    'deepseek': (re.compile(r'^deepseek-'), 'deepseek-v4-flash'),
-    'kimi':     (re.compile(r'^(kimi-|k3-)'), 'k3'),
+    'openai':   re.compile(r'^gpt-'),
+    'deepseek': re.compile(r'^deepseek-'),
+    'kimi':     re.compile(r'^(kimi-|k3)'),
 }
-keep, default = cfg[mode]
+keep = cfg[mode]
 pat = re.compile(r'"model":"([^"]+)"')
 roots = [os.path.join(home, 'sessions'), os.path.join(home, 'archived_sessions')]
 changed_files, changed_names, changed_paths = 0, set(), []
@@ -176,6 +192,7 @@ if uids:
         fh.write('\n'.join(uids) + '\n')
 PYEOF
 echo "$NOW_TS" > "$MARKER_MODEL"
+echo "$MODE:$DEF_MODEL" > "$CODEX_HOME/.switch-model-mode"
 
 if [ "$MODE" = "openai" ]; then
   echo "清理第三方会话残留（解决官方续聊校验报错）..."

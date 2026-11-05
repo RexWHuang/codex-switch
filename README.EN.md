@@ -1,5 +1,18 @@
 # codex-switch
 
+> Fork status: experimental on Codex 0.166.0-alpha.6. The provider-switch and
+> history-rewrite paths have only been tested with isolated local fixtures;
+> real DeepSeek/OpenAI round trips and desktop compatibility remain unverified.
+> Do not run this against valuable history without a separate full backup of
+> `~/.codex`. Switching replaces the entire config and rewrites session history.
+> Never commit API keys to this public repository.
+
+> The DeepSeek template defaults to `deepseek-flash`, per the current official
+> integration. Model and effort in the session database are read from the
+> selected template. Each provider change rescans all history; same-provider
+> runs remain incremental. The previous config is saved as `config.toml.bak-switch`
+> and is overwritten on the next switch.
+
 [中文文档](README.md) | [Changelog](CHANGELOG.EN.md)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
