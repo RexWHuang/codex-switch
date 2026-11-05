@@ -3,8 +3,9 @@
 > Fork status: experimental on Codex 0.166.0-alpha.6. Isolated short CLI
 > sessions were tested in both directions: ChatGPT subscription → DeepSeek API
 > → ChatGPT and the reverse, retaining context across switches. A separate
-> app-server test compacted each provider's history before switching. Desktop
-> UI, long sessions, and existing real histories have not been verified.
+> app-server test compacted each provider's history before switching, including
+> one run with approximately 36,000 characters of synthetic context. Desktop UI,
+> near-limit sessions, and existing real histories have not been verified.
 > Do not run this against valuable history without a separate full backup of
 > `~/.codex`. Switching replaces the entire config and rewrites session history.
 > Never commit API keys to this public repository.
