@@ -1,9 +1,9 @@
 # codex-switch
 
-> Fork status: experimental on Codex 0.166.0-alpha.6. In an isolated CLI test,
-> a real DeepSeek session retained its context after switching to the OpenAI
-> config and back. An isolated ChatGPT subscription request timed out, so a
-> real DeepSeek/OpenAI round trip and desktop compatibility remain unverified.
+> Fork status: experimental on Codex 0.166.0-alpha.6. Isolated short CLI
+> sessions were tested in both directions: ChatGPT subscription → DeepSeek API
+> → ChatGPT and the reverse, retaining context across switches. Desktop, long
+> sessions, compaction, and existing real histories have not been verified.
 > Do not run this against valuable history without a separate full backup of
 > `~/.codex`. Switching replaces the entire config and rewrites session history.
 > Never commit API keys to this public repository.
