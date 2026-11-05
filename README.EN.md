@@ -4,8 +4,10 @@
 > sessions were tested in both directions: ChatGPT subscription → DeepSeek API
 > → ChatGPT and the reverse, retaining context across switches. A separate
 > app-server test compacted each provider's history before switching, including
-> one run with approximately 36,000 characters of synthetic context. Desktop UI,
-> near-limit sessions, and existing real histories have not been verified.
+> one run with approximately 36,000 characters of synthetic context. One offline
+> copy of an existing 91-record session retained all non-model content after
+> switching to DeepSeek. Desktop UI, near-limit sessions, and other existing
+> histories have not been verified.
 > Do not run this against valuable history without a separate full backup of
 > `~/.codex`. Switching replaces the entire config and rewrites session history.
 > Never commit API keys to this public repository.
