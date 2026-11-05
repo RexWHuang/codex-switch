@@ -17,6 +17,11 @@
 > selected template. Each provider change rescans all history; same-provider
 > runs remain incremental. The previous config is saved as `config.toml.bak-switch`
 > and is overwritten on the next switch.
+>
+> Switching decompresses `.jsonl.zst` sessions to `.jsonl`, preserves the
+> compressed originals as `.zst.bak-switch`, and updates compressed index paths.
+> Install `zstd` and allow disk space for decompressed files. If both compressed
+> and uncompressed copies of a session exist, the switch stops for manual review.
 
 [中文文档](README.md) | [Changelog](CHANGELOG.EN.md)
 

@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -78,6 +79,54 @@ class SwitchingTest(unittest.TestCase):
             self.assertIn('密钥尚未配置', result.stderr)
             self.assertEqual(config.read_text(), 'model = "original"\n')
             self.assertFalse((home / 'config.toml.bak-switch').exists())
+
+    @unittest.skipUnless(shutil.which('zstd'), 'zstd is required')
+    def test_compressed_history_is_rewritten_and_backed_up(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'codex'
+            sessions = home / 'archived_sessions'
+            sessions.mkdir(parents=True)
+            (home / 'switch-config-deepseek.toml').write_text(
+                (ROOT / 'config-deepseek.toml').read_text().replace('YOUR_DEEPSEEK_API_KEY', 'test-key'))
+            plain = sessions / 'rollout.jsonl'
+            plain.write_text('{"type":"turn_context","payload":{"model":"gpt-6-luna"}}\n')
+            subprocess.run(['zstd', '-q', '--rm', str(plain)], check=True)
+            compressed = Path(str(plain) + '.zst')
+            with sqlite3.connect(home / 'state_5.sqlite') as db:
+                db.execute('create table threads (model_provider text, model text, reasoning_effort text, rollout_path text)')
+                db.execute('insert into threads values (?, ?, ?, ?)', ('openai', 'gpt-6-luna', 'medium', str(compressed)))
+            bin_dir = root / 'bin'
+            bin_dir.mkdir()
+            for name in ('osascript', 'sleep', 'open'):
+                path = bin_dir / name
+                path.write_text('#!/bin/sh\nexit 0\n')
+                path.chmod(0o755)
+            env = dict(os.environ, HOME=str(root), CODEX_HOME=str(home),
+                       PATH=str(bin_dir) + os.pathsep + os.environ['PATH'])
+            subprocess.run(['bash', str(ROOT / 'codex-switch.sh'), 'deepseek'], env=env,
+                           check=True, capture_output=True, text=True)
+            self.assertEqual(json.loads(plain.read_text())['payload']['model'], 'deepseek-flash')
+            self.assertTrue(Path(str(compressed) + '.bak-switch').exists())
+            with sqlite3.connect(home / 'state_5.sqlite') as db:
+                self.assertEqual(db.execute('select rollout_path from threads').fetchone()[0], str(plain))
+
+    @unittest.skipUnless(shutil.which('zstd'), 'zstd is required')
+    def test_duplicate_compressed_history_stops_before_switch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            (home / 'switch-config-deepseek.toml').write_text(
+                (ROOT / 'config-deepseek.toml').read_text().replace('YOUR_DEEPSEEK_API_KEY', 'test-key'))
+            (home / 'sessions').mkdir()
+            (home / 'sessions' / 'rollout.jsonl').write_text('original\n')
+            (home / 'sessions' / 'rollout.jsonl.zst').write_bytes(b'other')
+            (home / 'config.toml').write_text('model = "original"\n')
+            env = dict(os.environ, HOME=temp, CODEX_HOME=temp)
+            result = subprocess.run(['bash', str(ROOT / 'codex-switch.sh'), 'deepseek'],
+                                    env=env, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('同名压缩和未压缩会话', result.stderr)
+            self.assertEqual((home / 'config.toml').read_text(), 'model = "original"\n')
 
 
 if __name__ == '__main__':

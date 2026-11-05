@@ -46,6 +46,18 @@ with open(sys.argv[1], encoding='utf-8') as f:
 print(match.group(1) if match else 'medium')
 PYEOF
 )
+python3 - "$CODEX_HOME" <<'PYEOF'
+import os, shutil, sys
+for root in ('sessions', 'archived_sessions'):
+    for parent, _, names in os.walk(os.path.join(sys.argv[1], root)):
+        for name in names:
+            if not name.endswith('.jsonl.zst'):
+                continue
+            if not shutil.which('zstd'):
+                raise SystemExit('压缩会话需要 zstd；请先安装，未更改任何数据')
+            if os.path.exists(os.path.join(parent, name[:-4])):
+                raise SystemExit('发现同名压缩和未压缩会话，未更改任何数据：' + os.path.join(parent, name))
+PYEOF
 
 echo "正在退出 Codex 应用..."
 osascript -e "tell application \"$CODEX_APP\" to quit" 2>/dev/null || true
@@ -78,7 +90,7 @@ else
   FROM="openai"; TO="custom"
 fi
 python3 - "$CODEX_HOME" "$FROM" "$TO" "$DEF_MODEL" "$DEF_EFFORT" <<'PYEOF'
-import sqlite3, sys, os
+import sqlite3, sys, os, subprocess, time
 home, frm, to, model, effort = sys.argv[1:]
 db = os.path.join(home, 'state_5.sqlite')
 if not os.path.exists(db):
@@ -87,6 +99,34 @@ con = sqlite3.connect(db)
 with sqlite3.connect(db + '.bak-switch') as backup:
     con.backup(backup)
 os.chmod(db + '.bak-switch', 0o600)
+decompressed = 0
+for root in ('sessions', 'archived_sessions'):
+    for parent, _, names in os.walk(os.path.join(home, root)):
+        for name in names:
+            if not name.endswith('.jsonl.zst'):
+                continue
+            compressed = os.path.join(parent, name)
+            plain = compressed[:-4]
+            if os.path.exists(plain):
+                continue
+            temp = plain + '.tmp-switch-zstd'
+            try:
+                with open(temp, 'wb') as out:
+                    os.chmod(temp, 0o600)
+                    subprocess.run(['zstd', '-dc', compressed], stdout=out, check=True)
+                if not os.path.getsize(temp):
+                    raise ValueError('压缩会话解压结果为空')
+                os.replace(temp, plain)
+                backup = compressed + '.bak-switch'
+                if os.path.exists(backup):
+                    backup += '.' + str(time.time_ns())
+                os.replace(compressed, backup)
+                con.execute('update threads set rollout_path=? where rollout_path=?', (plain, compressed))
+                decompressed += 1
+            finally:
+                if os.path.exists(temp):
+                    os.remove(temp)
+print(f'已解压 {decompressed} 个会话并保留压缩备份')
 cur = con.execute("update threads set model_provider=? where model_provider=?", (to, frm))
 print(f"已更新 {cur.rowcount} 条会话标记: {frm} -> {to}")
 cur2 = con.execute("update threads set model=?, reasoning_effort=?", (model, effort))
@@ -187,6 +227,7 @@ for root in roots:
                 tmp = p + '.tmp-switch'
                 file_names = set()
                 with open(p, 'r', encoding='utf-8') as fin, open(tmp, 'w', encoding='utf-8') as fout:
+                    os.chmod(tmp, 0o600)
                     for line in fin:
                         rewritten, names = rewrite(line)
                         fout.write(rewritten)
@@ -267,6 +308,7 @@ for root in roots:
             try:
                 with open(p, encoding='utf-8', errors='ignore') as fin, \
                      open(tmp, 'w', encoding='utf-8') as fout:
+                    os.chmod(tmp, 0o600)
                     for line in fin:
                         # 规则 3：工具调用 ID 前缀（纯文本替换，覆盖所有嵌套副本）
                         line, n = ID_PAT.subn(r'"\1": "fc', line)
