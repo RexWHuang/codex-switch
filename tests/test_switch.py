@@ -16,6 +16,8 @@ class SwitchingTest(unittest.TestCase):
             home = root / 'codex'
             sessions = home / 'sessions'
             sessions.mkdir(parents=True)
+            (home / 'switch-config-deepseek.toml').write_text(
+                (ROOT / 'config-deepseek.toml').read_text().replace('YOUR_DEEPSEEK_API_KEY', 'test-key'))
             bin_dir = root / 'bin'
             bin_dir.mkdir()
             for name in ('osascript', 'sleep', 'open'):
@@ -23,10 +25,11 @@ class SwitchingTest(unittest.TestCase):
                 path.write_text('#!/bin/sh\nexit 0\n')
                 path.chmod(0o755)
             db = sqlite3.connect(home / 'state_5.sqlite')
+            db.execute('pragma journal_mode=wal')
+            db.execute('pragma wal_autocheckpoint=0')
             db.execute('create table threads (model_provider text, model text, reasoning_effort text)')
             db.execute("insert into threads values ('openai', 'gpt-6-luna', 'medium')")
             db.commit()
-            db.close()
             rollout = sessions / 'rollout.jsonl'
             metadata = {'type': 'turn_context', 'payload': {'model': 'gpt-6-luna'}}
             message = {'type': 'response_item', 'payload': {'type': 'message', 'model': 'my-data'}}
@@ -45,8 +48,11 @@ class SwitchingTest(unittest.TestCase):
                                check=True, capture_output=True, text=True)
             switch('openai')
             switch('deepseek')
+            with sqlite3.connect(home / 'state_5.sqlite.bak-switch') as backup:
+                self.assertEqual(backup.execute('select count(*) from threads').fetchone()[0], 1)
             self.assertEqual(records()[0]['payload']['model'], 'deepseek-flash')
             self.assertEqual(records()[1], message)
+            db.close()
             self.assertEqual(records()[2]['payload']['base_instructions']['provenance']['model'], 'deepseek-flash')
             self.assertEqual(records()[3]['payload']['state']['collaboration_mode']['model'], 'deepseek-flash')
             self.assertEqual(records()[4]['payload']['thread_settings']['model'], 'deepseek-flash')
@@ -59,6 +65,19 @@ class SwitchingTest(unittest.TestCase):
             switch('deepseek')
             self.assertEqual(records()[0]['payload']['model'], 'deepseek-flash')
             self.assertEqual(records()[1], message)
+
+    def test_missing_key_stops_before_changing_config(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            config = home / 'config.toml'
+            config.write_text('model = "original"\n')
+            env = dict(os.environ, HOME=temp, CODEX_HOME=temp)
+            result = subprocess.run(['bash', str(ROOT / 'codex-switch.sh'), 'deepseek'],
+                                    env=env, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('密钥尚未配置', result.stderr)
+            self.assertEqual(config.read_text(), 'model = "original"\n')
+            self.assertFalse((home / 'config.toml.bak-switch').exists())
 
 
 if __name__ == '__main__':

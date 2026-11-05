@@ -24,6 +24,29 @@ if [ "$MODE" != "openai" ] && [ "$MODE" != "deepseek" ] && [ "$MODE" != "kimi" ]
   echo "用法: $0 openai|deepseek|kimi"; exit 1
 fi
 
+CONFIG="$CODEX_HOME/switch-config-$MODE.toml"
+[ -f "$CONFIG" ] || CONFIG="$DIR/config-$MODE.toml"
+if [ "$MODE" = "deepseek" ] && grep -q 'YOUR_DEEPSEEK_API_KEY' "$CONFIG"; then
+  echo "DeepSeek 密钥尚未配置：请使用 $CODEX_HOME/switch-config-deepseek.toml" >&2
+  exit 1
+fi
+DEF_MODEL=$(python3 - "$CONFIG" <<'PYEOF'
+import re, sys
+with open(sys.argv[1], encoding='utf-8') as f:
+    match = re.search(r'^model\s*=\s*"([^"\n]+)"', f.read(), re.M)
+if not match:
+    raise SystemExit('配置中没有 model')
+print(match.group(1))
+PYEOF
+)
+DEF_EFFORT=$(python3 - "$CONFIG" <<'PYEOF'
+import re, sys
+with open(sys.argv[1], encoding='utf-8') as f:
+    match = re.search(r'^model_reasoning_effort\s*=\s*"([^"\n]+)"', f.read(), re.M)
+print(match.group(1) if match else 'medium')
+PYEOF
+)
+
 echo "正在退出 Codex 应用..."
 osascript -e "tell application \"$CODEX_APP\" to quit" 2>/dev/null || true
 sleep 3
@@ -41,7 +64,9 @@ fi
 
 echo "写入 $MODE 配置..."
 [ ! -f "$CODEX_HOME/config.toml" ] || cp -p "$CODEX_HOME/config.toml" "$CODEX_HOME/config.toml.bak-switch"
-cp "$DIR/config-$MODE.toml" "$CODEX_HOME/config.toml"
+[ ! -f "$CODEX_HOME/config.toml.bak-switch" ] || chmod 600 "$CODEX_HOME/config.toml.bak-switch"
+cp "$CONFIG" "$CODEX_HOME/config.toml"
+chmod 600 "$CODEX_HOME/config.toml"
 
 echo "同步会话显示标记与默认模型..."
 # 预设各模式默认模型与强度，切换后无需在界面重新选择（2026-09-18 新增）：
@@ -52,30 +77,16 @@ if [ "$MODE" = "openai" ]; then
 else
   FROM="openai"; TO="custom"
 fi
-DEF_MODEL=$(python3 - "$DIR/config-$MODE.toml" <<'PYEOF'
-import re, sys
-with open(sys.argv[1], encoding='utf-8') as f:
-    match = re.search(r'^model\s*=\s*"([^"\n]+)"', f.read(), re.M)
-if not match:
-    raise SystemExit('配置中没有 model')
-print(match.group(1))
-PYEOF
-)
-DEF_EFFORT=$(python3 - "$DIR/config-$MODE.toml" <<'PYEOF'
-import re, sys
-with open(sys.argv[1], encoding='utf-8') as f:
-    match = re.search(r'^model_reasoning_effort\s*=\s*"([^"\n]+)"', f.read(), re.M)
-print(match.group(1) if match else 'medium')
-PYEOF
-)
 python3 - "$CODEX_HOME" "$FROM" "$TO" "$DEF_MODEL" "$DEF_EFFORT" <<'PYEOF'
-import sqlite3, sys, os, shutil
+import sqlite3, sys, os
 home, frm, to, model, effort = sys.argv[1:]
 db = os.path.join(home, 'state_5.sqlite')
 if not os.path.exists(db):
     print("未找到 state_5.sqlite，跳过"); raise SystemExit
-shutil.copy(db, db + '.bak-switch')
 con = sqlite3.connect(db)
+with sqlite3.connect(db + '.bak-switch') as backup:
+    con.backup(backup)
+os.chmod(db + '.bak-switch', 0o600)
 cur = con.execute("update threads set model_provider=? where model_provider=?", (to, frm))
 print(f"已更新 {cur.rowcount} 条会话标记: {frm} -> {to}")
 cur2 = con.execute("update threads set model=?, reasoning_effort=?", (model, effort))

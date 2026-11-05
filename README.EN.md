@@ -56,7 +56,8 @@ cd codex-switch
 chmod +x codex-switch.sh *.command codeproxy-kimi.sh
 ```
 
-1. Edit `config-deepseek.toml`, replace `YOUR_DEEPSEEK_API_KEY` with your key
+1. Copy `config-deepseek.toml` to `~/.codex/switch-config-deepseek.toml`, set permissions to 600, and replace `YOUR_DEEPSEEK_API_KEY` with your key. Never put a key in a repository file. The script prefers `~/.codex/switch-config-<mode>.toml` and falls back to the repository template; an unset DeepSeek key stops the switch before the app is closed or data is changed.
+   Each file is a **complete configuration**, not an overlay: merge your existing projects, plugins, and other settings into each mode you use. Copy your existing `~/.codex/config.toml` to `~/.codex/switch-config-openai.toml` to preserve your official configuration.
 2. For Kimi, set up the local proxy first (next section)
 3. Run `./codex-switch.sh openai|deepseek|kimi`, or double-click a `.command`
 

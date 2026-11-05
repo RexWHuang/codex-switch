@@ -44,7 +44,8 @@ cd codex-switch
 chmod +x codex-switch.sh *.command codeproxy-kimi.sh
 ```
 
-1. 编辑 `config-deepseek.toml`，把 `YOUR_DEEPSEEK_API_KEY` 替换为你的 key
+1. 将 `config-deepseek.toml` 复制到 `~/.codex/switch-config-deepseek.toml`，设置权限为 600，再把 `YOUR_DEEPSEEK_API_KEY` 替换为你的 key；切勿将密钥写进仓库文件。脚本优先读取 `~/.codex/switch-config-<模式>.toml`，不存在时才读取仓库模板；缺少 DeepSeek 密钥时会在退出应用或改写数据前停止。
+   这些文件是**完整配置**而不是增量覆盖：要保留现有项目、插件和其他设置，请把它们合入每个使用的模式文件。可将现有 `~/.codex/config.toml` 复制为 `~/.codex/switch-config-openai.toml` 以保留官方模式配置。
 2. 需要 Kimi 的话，先装本地路由（见下节）
 3. 使用：`./codex-switch.sh openai|deepseek|kimi`，或双击对应 `.command`
 
