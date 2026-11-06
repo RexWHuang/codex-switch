@@ -18,6 +18,8 @@
 
 - **Token鲨 接口地址改为官方对外入口 `https://llmv1.ahau.edu.cn/v1`**：学校《开通通知》《大模型公共服务平台使用手册》《常用模型接入工具使用说明》三处一致写明「平台固定接口地址为 https://llmv1.ahau.edu.cn/v1」。此前用的 `http://llm.ahau.edu.cn:4000/v1` 取自平台接口 `/api/me/api-base-url/`，那是**平台后端内部**的网关地址，学生侧直连会被校园网准入策略丢包（TCP 握手无应答），在 80/81/8080 上则返回带 `Client IP` 的自定义拦截页，看着像服务挂了其实是网络策略。443 端口上的 `llmv1.ahau.edu.cn` 直连可用（uvicorn + vLLM），`/v1/models`、`/v1/chat/completions`、`/v1/responses` 均实测 200，Responses 端点原生支持 `tools` / `parallel_tool_calls`
 - **模型目录生成器支持 `max_input_tokens`**：Token鲨 的 `/v1/models` 返回的是 `max_input_tokens` 而不是 `context_window`，此前生成器取不到上下文长度，目录里 `context_window` 为空
+- **第三方网关不再被 `custom_tool_call` 卡住**：Codex 的自由文本型工具（`apply_patch`、`exec`）在 Responses API 里的调用记录是两种特殊 input item 类型 `custom_tool_call` / `custom_tool_call_output`。OpenAI 官方认，但很多第三方网关（Token鲨 背后的 litellm 代理等）只认标准 `function_call`，回放老会话直接 HTTP 400：`Unsupported input item type: custom_tool_call (parameter=input)`——所以「新会话正常、老会话一打开就报错」。生成器不再往目录里写 `apply_patch_tool_type`：Codex 0.168 的该字段只认 `freeform`（填 `function` 会让整个目录解析失败），删掉字段则 Codex 根本不注册 apply_patch 工具，模型改用 `exec_command` 改文件，历史里只剩标准 `function_call`
+- **`clean-custom-tool-calls.py` 清洗存量历史**：把 rollout 文件里的 `custom_tool_call` / `custom_tool_call_output` 改写成标准 `function_call` / `function_call_output`（`input` → `arguments`），让切换前录下的对话在第三方网关上也能续聊。待改文件会打包成单个 `tar.gz` 存到 `~/.codex/backups/`（受影响的 rollout 动辄数 GB，逐个复制会撑爆磁盘），改完必须接着跑 `remap-history-base.py` 重映射分叉偏移并失效 GUI 投影缓存
 - **模型目录生成器跳过占位符密钥**：切换模板里留的是占位符，真密钥在钥匙串或 `~/.codex/config.toml` 里；生成器拿占位符去请求 `/models` 会得到 401，很难看出是哪一步错了
 - **切换时清理无效的 `[model_providers.X.auth]` 段**：Codex 的 model provider 根本没有 `auth` 字段，这种「用命令取密钥」的写法会被静默忽略（不报错），结果等于没有凭据、平台直接返回 401。脚本现在按行删掉整段（段里的 `args = [...]` 数组行不会被漏掉，漏掉会写出非法 TOML 让 Codex 起不来）
 

@@ -111,7 +111,8 @@ EFFORT_DESCRIPTIONS = {
 }
 
 
-def build_entry(template, spec, default_effort='high'):
+def build_entry(template, spec, default_effort='high',
+                shell_type='shell_command', apply_patch_tool_type=None):
     entry = json.loads(json.dumps(template))
     entry['slug'] = spec['id']
     entry['display_name'] = spec.get('name') or spec['id']
@@ -144,6 +145,24 @@ def build_entry(template, spec, default_effort='high'):
     entry['priority'] = 1
     # code_mode_only 会让 Codex 发送自定义 exec 工具，第三方 Responses 端点不接受
     entry.pop('tool_mode', None)
+    # 自定义工具（unified_exec / freeform apply_patch）在 Responses API 里的调用记录
+    # 是 custom_tool_call / custom_tool_call_output 这两种 input item 类型；
+    # 很多第三方网关（含 Token鲨 的 litellm 代理）只认标准 function_call，
+    # 回放历史时会报 "Unsupported input item type: custom_tool_call"（HTTP 400）。
+    #
+    # shell_type='shell_command' 时 exec/write_stdin 都是标准 function 工具，没问题。
+    # apply_patch 则不同：Codex 0.168 的 ApplyPatchToolType 只有 freeform 一个变体
+    # （填 'function' 会让整个模型目录解析失败：unknown variant `function`），
+    # 一旦写了这个字段，Codex 就会注册一个 custom 类型的 apply_patch 工具，
+    # 模型一旦调用它，历史里就留下 custom_tool_call，下一轮请求必 400。
+    # **删掉这个字段** → Codex 根本不注册 apply_patch → 模型改用 exec_command 改文件，
+    # 历史里只会留下标准 function_call。实测（2026-11-06，Token鲨）：
+    # 删字段后请求里 26 个工具零 custom。
+    entry['shell_type'] = shell_type
+    if apply_patch_tool_type:
+        entry['apply_patch_tool_type'] = apply_patch_tool_type
+    else:
+        entry.pop('apply_patch_tool_type', None)
     return entry
 
 
@@ -154,6 +173,14 @@ def main():
     parser.add_argument('--base-url', help='API base_url（覆盖配置文件里的值）')
     parser.add_argument('--out', required=True, help='输出的目录 JSON 路径')
     parser.add_argument('--api-key', help='API key（默认从配置或环境变量读取）')
+    parser.add_argument('--shell-type', default='shell_command',
+                        help='模型目录里的 shell 工具类型（默认 shell_command：'
+                             'unified_exec 会在历史里留下 custom_tool_call，第三方网关多半不认）')
+    parser.add_argument('--apply-patch-tool-type', default=None,
+                        help='apply_patch 的工具类型。默认【不写这个字段】——'
+                             'Codex 0.168 只认 freeform，写了就会注册 custom 类型工具，'
+                             '历史里留下 custom_tool_call，第三方网关回放时 400。'
+                             '只有网关明确支持 custom 工具时才传 freeform')
     args = parser.parse_args()
 
     text = ''
@@ -180,7 +207,10 @@ def main():
     if not specs:
         raise SystemExit(f'{base_url}/models 未返回模型清单')
 
-    catalog = {'models': [build_entry(template, s) for s in specs]}
+    catalog = {'models': [build_entry(template, s,
+                                      shell_type=args.shell_type,
+                                      apply_patch_tool_type=args.apply_patch_tool_type)
+                          for s in specs]}
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or '.', exist_ok=True)
     with open(args.out, 'w', encoding='utf-8') as fh:
         json.dump(catalog, fh, ensure_ascii=False, indent=2)

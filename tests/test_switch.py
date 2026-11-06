@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -402,6 +403,113 @@ class TokenSharkTest(unittest.TestCase):
             self.assertNotIn('refresh_interval_ms', rendered)
             # 删干净之后必须仍是合法 TOML
             tomllib.loads(rendered)
+
+
+class CleanCustomToolCallsTest(unittest.TestCase):
+    """clean-custom-tool-calls.py：把历史里的 custom_tool_call 改写成标准 function_call。"""
+
+    def _make_home(self, root):
+        home = root / 'codex'
+        sessions = home / 'sessions' / '2026' / '03' / '15'
+        sessions.mkdir(parents=True)
+        rollout = sessions / 'rollout-2026-03-15T11-00-00-abc.jsonl'
+        lines = [
+            {'timestamp': '2026-03-15T11:00:00Z', 'ordinal': 0, 'type': 'session_meta',
+             'payload': {'id': 'abc'}},
+            {'timestamp': '2026-03-15T11:00:01Z', 'ordinal': 1, 'type': 'response_item',
+             'payload': {'type': 'custom_tool_call', 'status': 'completed', 'call_id': 'call_1',
+                         'name': 'apply_patch', 'input': '*** Begin Patch\n+x\n*** End Patch'}},
+            {'timestamp': '2026-03-15T11:00:02Z', 'ordinal': 2, 'type': 'response_item',
+             'payload': {'type': 'custom_tool_call_output', 'call_id': 'call_1',
+                         'output': '{"output":"Success"}'}},
+            {'timestamp': '2026-03-15T11:00:03Z', 'ordinal': 3, 'type': 'response_item',
+             'payload': {'type': 'message', 'role': 'assistant', 'content': []}},
+        ]
+        rollout.write_text(''.join(json.dumps(x, ensure_ascii=False) + '\n' for x in lines))
+        return home, rollout
+
+    def test_converts_custom_tool_calls_to_function_calls(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home, rollout = self._make_home(root)
+            result = subprocess.run(
+                [sys.executable, str(ROOT / 'clean-custom-tool-calls.py'),
+                 '--codex-home', str(home)],
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payloads = [json.loads(line)['payload']
+                        for line in rollout.read_text().splitlines() if line.strip()]
+            types = [p.get('type') for p in payloads]
+            self.assertNotIn('custom_tool_call', types)
+            self.assertNotIn('custom_tool_call_output', types)
+            call = next(p for p in payloads if p.get('type') == 'function_call')
+            self.assertEqual(call['name'], 'apply_patch')
+            self.assertEqual(call['call_id'], 'call_1')
+            # arguments 必须是 JSON 字符串，且原样保留自由文本
+            self.assertEqual(json.loads(call['arguments'])['input'],
+                             '*** Begin Patch\n+x\n*** End Patch')
+            out = next(p for p in payloads if p.get('type') == 'function_call_output')
+            self.assertEqual(out['call_id'], 'call_1')
+
+    def test_dry_run_leaves_file_untouched_and_creates_backup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home, rollout = self._make_home(root)
+            before = rollout.read_bytes()
+            result = subprocess.run(
+                [sys.executable, str(ROOT / 'clean-custom-tool-calls.py'),
+                 '--codex-home', str(home), '--dry-run'],
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(rollout.read_bytes(), before)
+            self.assertFalse((home / 'backups').exists())
+
+    def test_backup_archive_contains_original_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home, rollout = self._make_home(root)
+            result = subprocess.run(
+                [sys.executable, str(ROOT / 'clean-custom-tool-calls.py'),
+                 '--codex-home', str(home)],
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            backups = list((home / 'backups').glob('*.tar.gz'))
+            self.assertEqual(len(backups), 1)
+            import tarfile
+            with tarfile.open(backups[0]) as tf:
+                members = tf.getnames()
+                self.assertTrue(any(m.endswith(rollout.name) for m in members), members)
+
+
+    def test_output_containing_line_separators_is_still_converted(self):
+        """工具输出里常混着 \\x0c / \\u2028 等字符，用 str.splitlines() 切行会把
+        一条 JSON 记录劈成两半导致漏改（2026-11-06 实测漏过 7 条）。"""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'codex'
+            sessions = home / 'sessions' / '2026' / '03' / '15'
+            sessions.mkdir(parents=True)
+            rollout = sessions / 'rollout-2026-03-15T12-00-00-xyz.jsonl'
+            tricky = 'Script completed\x0cWall time 0.4 seconds\u2028Output:\n\x0b行'
+            lines = [
+                {'timestamp': '2026-11-03T09:11:14Z', 'ordinal': 28, 'type': 'response_item',
+                 'payload': {'type': 'custom_tool_call_output', 'id': 'ctco_1',
+                             'call_id': 'call_9',
+                             'output': [{'type': 'input_text', 'text': tricky}]}},
+            ]
+            rollout.write_text(''.join(json.dumps(x, ensure_ascii=False) + '\n' for x in lines))
+            result = subprocess.run(
+                [sys.executable, str(ROOT / 'clean-custom-tool-calls.py'),
+                 '--codex-home', str(home)],
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payloads = [json.loads(line)['payload']
+                        for line in rollout.read_text().split('\n') if line.strip()]
+            self.assertEqual(payloads[0]['type'], 'function_call_output')
+            self.assertEqual(payloads[0]['call_id'], 'call_9')
+            # 数组形态的 output 要拍平成字符串（网关只认字符串）
+            self.assertIsInstance(payloads[0]['output'], str)
+            self.assertIn('Script completed', payloads[0]['output'])
 
 
 if __name__ == '__main__':

@@ -89,10 +89,11 @@ Token鲨 平台的 OpenAI 兼容网关。**对外接入地址是 `https://llmv1.
 
    预检通过后，密钥会被写进 `~/.codex/config.toml`（权限 600），模型目录 `~/.codex/token-shark-models.json` 存在时自动写入 `model_catalog_json`。
 
-**两个必须知道的坑**
+**三个必须知道的坑**
 
 - **Codex 的 model provider 没有 `auth` 字段**。`[model_providers.token_shark.auth]` 这种「用命令取密钥」的写法会被**静默忽略**（不报错），结果等于没有凭据，平台直接返回 401。脚本切换时会自动删掉这类段。认证只能用 `experimental_bearer_token = "sk-..."`（内联，桌面端 launchd 环境拿不到 shell 变量，`env_key` 在桌面端不可用）。
 - **别把内部网关地址当对外入口**。`llm.ahau.edu.cn:4000` 只在平台内网可达：校园网 ACL 会把它的 SYN 直接丢包，在 80/81/8080 上则返回一张带 `Client IP` 的「Server Unavailable」拦截页，看着像服务挂了，其实是网络策略。**对策不是找管理员开端口，而是换域名**——用官方的 `https://llmv1.ahau.edu.cn/v1`。
+- **网关只认标准 function 工具，不认「自由文本型」工具**。见下面「custom 工具与 `custom_tool_call`」一节。
 
   预检通过后脚本会自动选 `wire_api`：网关有 `/responses` 就用 `responses`（Codex 0.166+ 的原生协议），只有 `/chat/completions` 就退到 `chat`。
 
@@ -101,6 +102,52 @@ Token鲨 平台的 OpenAI 兼容网关。**对外接入地址是 `https://llmv1.
   ```bash
   CODEX_SWITCH_TOKEN_SHARK_BASE_URL=https://llmv1.ahau.edu.cn/v1 ./codex-switch.sh token_shark
   ```
+
+## custom 工具与 `custom_tool_call`
+
+**现象**：切到第三方网关后打开旧会话直接报错
+
+```
+litellm.BadRequestError: OpenAIException -
+{"error":{"message":"Unsupported input item type: custom_tool_call (parameter=input)"}}
+```
+
+**原因**：Codex 的「自由文本型」工具（`apply_patch`、`exec`）在 Responses API 里的调用记录不是普通 function，而是两种特殊 input item：
+
+```jsonc
+{"type": "custom_tool_call",        "call_id": "...", "name": "apply_patch", "input": "<自由文本>"}
+{"type": "custom_tool_call_output", "call_id": "...", "output": "..."}
+```
+
+OpenAI 官方 API 认这两种；很多第三方网关（Token鲨 背后的 litellm 代理、vLLM 直连等）**只认标准 `function_call`**，回放历史时直接 400。新会话没事，是因为还没用到这类工具；老会话一打开就崩，是因为历史里存着这些条目。
+
+**三层修复**（`gen-model-catalog.py` + `clean-custom-tool-calls.py` + `remap-history-base.py`）：
+
+1. **不再产生**：模型目录里**删掉 `apply_patch_tool_type` 字段** → Codex 根本不注册 `apply_patch` 工具（0.168 的 `ApplyPatchToolType` 只有 `freeform` 一个变体，写 `function` 会让整个目录解析失败），模型改用 `exec_command` 改文件，历史里只会留下标准 `function_call`。
+   同理 `shell_type` 用 `shell_command`（`unified_exec` 也会留下 `custom_tool_call`）、剔除 `tool_mode`（`code_mode_only` 会让 Codex 改用自定义 `exec` 工具）。
+
+   ```bash
+   python3 gen-model-catalog.py --provider token_shark \
+       --config ~/.codex/config.toml --out ~/.codex/token-shark-models.json
+   ```
+
+2. **清洗存量**：把历史里的 `custom_tool_call` / `custom_tool_call_output` 改写成标准 `function_call` / `function_call_output`（`input` → `arguments`）：
+
+   ```bash
+   python3 clean-custom-tool-calls.py --codex-home ~/.codex   # 先加 --dry-run 看统计
+   ```
+
+   脚本默认把所有待改文件打成 `~/.codex/backups/rollouts-custom-tool-call-*.tar.gz`（受影响的 rollout 动辄 2GB+，不能逐个复制 `.bak`，磁盘会撑爆）。
+
+3. **修复分叉偏移**：改写会改变文件字节长度，分叉会话的 `history_base.end_byte_offset` 会越界，App 报 `cutoff byte offset is past the source rollout`。紧接着跑：
+
+   ```bash
+   python3 remap-history-base.py ~/.codex
+   ```
+
+   它会重映射偏移并失效 GUI 投影缓存，之后重启 App。
+
+> 官方 API 侧没有这个限制：切回 openai 模式时，改写后的 `function_call` 同样能回放（工具名不在 `tools` 列表里也不会被官方校验）。
 
 ## 第三方模式的浏览器控制（可选）
 
@@ -174,6 +221,7 @@ python3 gen-model-catalog.py --provider custom \
 | 切换后对话内容停在旧时间、最新消息不显示 | GUI 投影缓存（`thread_history_1.sqlite`）按字节偏移索引 rollout 文件，脚本改写后偏移失效——脚本已自动失效受影响线程的投影；旧版本脚本可手动删除该库中对应 thread_id 的投影行（或整表清空），重启 app 自动重建，数据在 jsonl 里不会丢 |
 | 官方模式续聊旧对话报 `array_above_max_length` / `invalid_encrypted_content` / `invalid_id_prefix` / `Item with id 'rs_...' not found` | 第三方历史残留（reasoning content/encrypted_content/rs_ id、工具调用 tool_ 前缀 id），切到 openai 时脚本会自动清理；仍遇到说明该会话是切换后新建的，重跑一次切换脚本 |
 | 第三方模式续聊官方会话报 `passed gpt-5.x` | 会话元数据模型名未改写，重跑一次切换脚本 |
+| 第三方模式报 `Unsupported input item type: custom_tool_call (parameter=input)` | 历史里有 `apply_patch`/`exec` 这类自由文本工具的调用记录，第三方网关只认标准 `function_call`。先跑 `python3 clean-custom-tool-calls.py ~/.codex` 清洗历史，再跑 `python3 remap-history-base.py ~/.codex` 修分叉偏移，最后重启 App；新会话不会再犯（模型目录里删掉 `apply_patch_tool_type`，见「custom 工具与 `custom_tool_call`」一节） |
 | 界面选到了别家模型 | 目录未分家，见「模型目录分家」一节 |
 | 验证路由是否正常 | `curl -s http://127.0.0.1:8787/v1/responses -H "Content-Type: application/json" -d '{"model":"kimi-for-coding","input":"hi","stream":false}'` |
 
@@ -193,6 +241,7 @@ python3 gen-model-catalog.py --provider custom \
 - `check-provider.py` — 供应商状态诊断（切换时自动可用，也可独立运行）
 - `gen-model-catalog.py` — 生成第三方供应商的 Codex 模型目录
 - `remap-history-base.py` — 分叉会话 history_base 偏移重映射（切换时自动调用，可独立运行）
+- `clean-custom-tool-calls.py` — 把历史里的 `custom_tool_call` / `custom_tool_call_output` 改写成标准 `function_call`（第三方网关回放老会话必备，配合 `remap-history-base.py` 使用）
 - `trim-rollout-output.py` — 巨型会话智能修剪：裁旧工具输出/粘贴大图，保对话文字（需配合 remap 使用）
 - `config-openai.toml` / `config-deepseek.toml` / `config-kimi.toml` / `config-token-shark.toml` — 四套配置模板
 - `切换到*.command` — 双击入口
