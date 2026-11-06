@@ -9,6 +9,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- **token_shark 模式（校园 LLM 网关）**：`./codex-switch.sh token_shark`（或双击 `切换到Token鲨.command`）。切换前从 macOS 钥匙串读 `codex-token-shark`，再依次做网关预检（`GET {base_url}/models`，要求 HTTP 200 且响应体是 JSON）与协议探测（`/responses` 还是 `/chat/completions`，据此决定 `wire_api`），预检不过就中止且原配置一个字都不动——网关不通比额度耗尽更糟。密钥只存钥匙串，不进仓库也不进模板，切换时才注入 `config.toml`（600 权限）；`~/.codex/token-shark-models.json` 存在时自动写入 `model_catalog_json`。会话 provider 标记按通用逻辑刷成 `token_shark`
+
+### Fixed
+
+- **切换时清理无效的 `[model_providers.X.auth]` 段**：Codex 的 model provider 根本没有 `auth` 字段，这种「用命令取密钥」的写法会被静默忽略（不报错），结果等于没有凭据、平台直接返回 401。脚本现在按行删掉整段（段里的 `args = [...]` 数组行不会被漏掉，漏掉会写出非法 TOML 让 Codex 起不来）
+
 ## [1.6.1] - 2026-10-22
 
 ### Added

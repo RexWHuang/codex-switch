@@ -1,0 +1,38 @@
+# Token鲨（校园 LLM 网关）直连模式配置模板
+#
+# 网关地址以平台自己返回的为准：登录 Token鲨 网页后调用
+#   GET https://llm.ahau.edu.cn/api/me/api-base-url/   （头 Authorization: Bearer <网页登录 token>）
+# 返回 data.base_url / data.chat_completions_url / data.models_url。
+#
+# provider 名称（model_provider）可以自定义，但必须与 [model_providers.<同名>] 段一致。
+# 切换脚本会把这个名字同步到所有历史会话的标记里；名字对不上时桌面端会报
+# "This chat uses X, but your current provider is Y"，表现为「继续聊天未成功」。
+
+model_provider = "token_shark"
+model = "GLM-5.3-Flash-SS"          # 或 Qwen3.8-Flash-Next-SS / Deepseek-V4.1-Flash-SS
+# 平台侧单次上下文上限 128000（管理员可配），不要按模型原厂 1M 填。
+model_context_window = 128000
+disable_response_storage = true
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+web_search = "disabled"              # 平台网关没有 Codex 内置联网搜索
+# 不设 model_reasoning_effort：平台模型目录的 supported_reasoning_levels 为空，
+# 设了会让 Codex 在请求里带上网关不认的 reasoning 参数。
+
+# 模型选择器目录，只放平台允许的模型，避免在 Token鲨 模式下错选别家模型，
+# 也避免目标模型退回 fallback metadata（会报 "Model metadata for `X` not found"）。
+# 切换脚本会在 ~/.codex/token-shark-models.json 存在时自动写入 model_catalog_json；
+# 目录缺失时该行会被去掉（并在终端给出警告）。
+
+[model_providers.token_shark]
+name = "Token Shark"
+base_url = "http://llm.ahau.edu.cn:4000/v1"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = false
+# 密钥内联而非 env_key：桌面端由 launchd 启动，拿不到 shell 里 export 的变量，
+# 用 env_key 会报 "Missing environment variable"（只影响桌面端，CLI 正常）。
+# 切换脚本会在切换时用钥匙串里的 codex-token-shark 覆盖下面这行占位符。
+# 注意：Codex 的 model provider 没有 auth 段（命令式取密钥）这个字段，
+# 写了会被静默忽略 —— 那样等于没有凭据，平台会返回 401。
+experimental_bearer_token = "TOKEN_SHARK_API_KEY"

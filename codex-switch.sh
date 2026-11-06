@@ -1,7 +1,12 @@
 #!/bin/bash
-# Codex 供应商一键切换：./codex-switch.sh openai|deepseek|kimi
+# Codex 供应商一键切换：./codex-switch.sh openai|deepseek|kimi|token_shark
 # 自动完成：退出 Codex 应用 → 替换配置 → 同步会话显示标记 →
 #           改写历史会话模型名 → （仅 openai）清理第三方 reasoning 残留 → 重启应用
+#
+# token_shark（校园 LLM 网关）模式额外做两步，且都发生在改动任何数据之前：
+#   1) 从 macOS 钥匙串取密钥（不落仓库、不写进模板）
+#   2) 网关连通性预检 + 协议探测（Responses 还是 Chat Completions）
+#      预检不过就中止，原配置保持不变 —— 网关不通比额度耗尽更糟。
 #
 # 注意：如果你同时装了 CC Switch，不要在它的界面里点「启用」来切换——
 # 它只改自己的数据库标记，不会写入 ~/.codex/config.toml（v3.19.2 与 v3.20.1
@@ -20,12 +25,18 @@ SHIM_LABEL="${CODEX_SWITCH_SHIM_LABEL:-com.codexswitch.schema-shim-kimi}"
 CODEX_APP="${CODEX_SWITCH_APP:-ChatGPT}"
 CODEX_CLI="${CODEX_SWITCH_CLI:-/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex}"
 
-if [ "$MODE" != "openai" ] && [ "$MODE" != "deepseek" ] && [ "$MODE" != "kimi" ] && [ "$MODE" != "check" ]; then
-  echo "用法: $0 openai|deepseek|kimi|check"; exit 1
+if [ "$MODE" != "openai" ] && [ "$MODE" != "deepseek" ] && [ "$MODE" != "kimi" ] && [ "$MODE" != "token_shark" ] && [ "$MODE" != "check" ]; then
+  echo "用法: $0 openai|deepseek|kimi|token_shark|check"; exit 1
 fi
 
-CONFIG="$CODEX_HOME/switch-config-$MODE.toml"
-[ -f "$CONFIG" ] || CONFIG="$DIR/config-$MODE.toml"
+# 配置文件名用连字符，provider 名用下划线：两者不必同名
+case "$MODE" in
+  token_shark) MODE_TAG="token-shark";;
+  *) MODE_TAG="$MODE";;
+esac
+
+CONFIG="$CODEX_HOME/switch-config-$MODE_TAG.toml"
+[ -f "$CONFIG" ] || CONFIG="$DIR/config-$MODE_TAG.toml"
 if [ "$MODE" = "check" ]; then
   # 只读诊断：定位「桌面端打不开会话」等问题的根因，不改动任何数据
   shift
@@ -51,6 +62,178 @@ with open(sys.argv[1], encoding='utf-8') as f:
 print(match.group(1) if match else 'medium')
 PYEOF
 )
+
+# ---------- Token鲨：取密钥 + 网关预检 + 协议探测（必须早于任何数据改动）----------
+RENDERED=""
+cleanup() {
+  if [ -n "$RENDERED" ] && [ -f "$RENDERED" ]; then
+    python3 -c 'import os, sys; os.remove(sys.argv[1])' "$RENDERED" 2>/dev/null || true
+  fi
+  return 0
+}
+trap cleanup EXIT
+if [ "$MODE" = "token_shark" ]; then
+  TS_KEY="$(security find-generic-password -a token-shark -s codex-token-shark -w 2>/dev/null || true)"
+  if [ -z "$TS_KEY" ]; then
+    echo "❌ 钥匙串里没有 codex-token-shark，取不到 Token鲨 密钥；原配置保持不变。" >&2
+    exit 2
+  fi
+  RENDERED="$(mktemp "${TMPDIR:-/tmp}/codex-switch-token-shark.XXXXXX")"
+  chmod 600 "$RENDERED"
+  if ! TS_WIRE="$(python3 - "$CONFIG" "$RENDERED" "$CODEX_HOME/token-shark-models.json" "$TS_KEY" <<'PYEOF'
+import json, os, re, subprocess, sys, tempfile
+
+config_path, out_path, catalog_path, key = sys.argv[1:5]
+
+
+def fail(message):
+    sys.stderr.write(message + '\n')
+    raise SystemExit(1)
+
+
+def provider_span(text, provider):
+    return re.search(r'^(\[model_providers\.' + re.escape(provider) + r'\]\s*$(.*?)(?=^\[|\Z))',
+                     text, re.M | re.S)
+
+
+def probe(url, payload=None):
+    """返回 (状态码, content-type, 响应体前 200 字节)。"""
+    body_fd, body_path = tempfile.mkstemp()
+    os.close(body_fd)
+    head_fd, head_path = tempfile.mkstemp()
+    os.close(head_fd)
+    cmd = ['curl', '-s', '-o', body_path, '-D', head_path, '-w', '%{http_code}', '--max-time', '15']
+    if payload is not None:
+        cmd += ['-X', 'POST', '-H', 'Content-Type: application/json', '-d', payload]
+    cmd += [url, '-H', 'Authorization: Bearer ' + key]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
+        code = (proc.stdout or '').strip() or '000'
+    except (OSError, subprocess.SubprocessError):
+        code = '000'
+    try:
+        head = open(head_path, encoding='utf-8', errors='ignore').read()
+        body = open(body_path, encoding='utf-8', errors='ignore').read(200)
+    except OSError:
+        head, body = '', ''
+    finally:
+        for path in (body_path, head_path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    ctype = ''
+    for line in head.splitlines():
+        if line.lower().startswith('content-type:'):
+            ctype = line.split(':', 1)[1].strip().lower()
+    return code, ctype, body
+
+
+text = open(config_path, encoding='utf-8').read()
+prov = re.search(r'^model_provider\s*=\s*"([^"\n]+)"', text, re.M)
+provider = prov.group(1) if prov else 'token_shark'
+span = provider_span(text, provider)
+if not span:
+    fail(f'配置里没有 [model_providers.{provider}] 段')
+block = span.group(1)
+bm = re.search(r'^base_url\s*=\s*"([^"\n]+)"', block, re.M)
+if not bm:
+    fail('读不到 base_url')
+base = bm.group(1).rstrip('/')
+mm = re.search(r'^model\s*=\s*"([^"\n]+)"', text, re.M)
+model = mm.group(1) if mm else ''
+
+code, ctype, body = probe(base + '/models')
+sys.stderr.write(f'预检 GET {base}/models -> HTTP {code} ({ctype or "无 content-type"})\n')
+if code != '200' or not body.lstrip().startswith('{'):
+    fail('网关不可达或返回的不是 JSON：Token鲨 网关只对平台内网/校园网出口 IP 开放，'
+         '本机不可达时不要强行切换。')
+
+
+def route_exists(path, payload):
+    c, ct, b = probe(base + path, payload)
+    sys.stderr.write(f'探测 POST {base}{path} -> HTTP {c} ({ct or "无 content-type"})\n')
+    if c in ('000', '404', '405'):
+        return False
+    if c == '200' and 'html' in ct:
+        return False  # 命中了前端兜底页，不是 API 路由
+    return True
+
+
+resp_ok = route_exists('/responses', json.dumps({'model': model, 'input': []}))
+chat_ok = route_exists('/chat/completions', json.dumps({'model': model, 'messages': []}))
+if resp_ok:
+    wire = 'responses'
+elif chat_ok:
+    wire = 'chat'
+else:
+    fail('网关既没有 /responses 也没有 /chat/completions，Codex 无法驱动它。')
+
+# 删除 [model_providers.X.auth] 段：Codex 的 model provider 没有 auth 字段，
+# 写了会被静默忽略 —— 等于没有凭据，平台会返回 401。
+# 按行删：段里的数组参数（args = [...]）也带方括号，不能用正则一刀切。
+def strip_auth_sections(text):
+    out, skipping = [], False
+    for line in text.splitlines(keepends=True):
+        if re.match(r'^\s*\[[A-Za-z_][\w.\-]*(\.[\w.\-]*)*\.auth\]\s*$', line):
+            skipping = True
+            continue
+        if skipping:
+            if re.match(r'^\[[A-Za-z_][\w.\-]*(\.[\w.\-]*)*\]\s*$', line):
+                skipping = False
+            else:
+                continue
+        out.append(line)
+    return ''.join(out)
+
+
+text = strip_auth_sections(text)
+
+
+def set_provider_value(text, provider, field, value):
+    span = provider_span(text, provider)
+    if not span:
+        return text
+    block = span.group(1)
+    quoted = value.replace('\\', '\\\\').replace('"', '\\"')
+    new_block, count = re.subn(r'^(\s*' + re.escape(field) + r'\s*=\s*)"[^"\n]*"',
+                               lambda m: m.group(1) + '"' + quoted + '"', block, flags=re.M)
+    if count == 0:
+        new_block = new_block.rstrip('\n') + f'\n{field} = "{quoted}"\n'
+    return text.replace(block, new_block, 1)
+
+
+text = set_provider_value(text, provider, 'experimental_bearer_token', key)
+text = set_provider_value(text, provider, 'wire_api', wire)
+
+if os.path.exists(catalog_path):
+    if re.search(r'^\s*model_catalog_json\s*=', text, re.M):
+        text = re.sub(r'^(\s*model_catalog_json\s*=\s*)"[^"\n]*"',
+                      lambda m: m.group(1) + '"' + catalog_path + '"', text, flags=re.M)
+    else:
+        # 顶层键必须放在第一个 [段] 之前
+        cut = re.search(r'^\[', text, re.M)
+        at = cut.start() if cut else len(text)
+        text = text[:at] + f'model_catalog_json = "{catalog_path}"\n' + text[at:]
+else:
+    text = re.sub(r'^\s*model_catalog_json\s*=\s*"[^"\n]*"\n', '', text, flags=re.M)
+    sys.stderr.write(f'警告：模型目录 {catalog_path} 不存在，已从配置中去掉 model_catalog_json\n')
+
+with open(out_path, 'w', encoding='utf-8') as fh:
+    fh.write(text)
+os.chmod(out_path, 0o600)
+print(wire)
+PYEOF
+)"; then
+    python3 -c 'import os, sys; os.remove(sys.argv[1])' "$RENDERED" 2>/dev/null || true
+    RENDERED=""
+    exit 4
+  fi
+  CONFIG="$RENDERED"
+  echo "✅ Token鲨 网关可达，协议 wire_api = \"$TS_WIRE\""
+  unset TS_KEY
+fi
+
 python3 - "$CODEX_HOME" <<'PYEOF'
 import os, shutil, sys
 for root in ('sessions', 'archived_sessions'):
@@ -160,7 +343,7 @@ python3 - "$MODE" <<'PYEOF'
 import sqlite3, sys, os
 mode = sys.argv[1]
 # 按供应商名字模糊匹配，不同安装里 UUID 各不相同
-kw = {'openai': 'openai%', 'deepseek': 'deepseek%', 'kimi': 'kimi%'}[mode]
+kw = {'openai': 'openai%', 'deepseek': 'deepseek%', 'kimi': 'kimi%', 'token_shark': 'token_shark%'}[mode]
 db = os.path.expanduser('~/.cc-switch/cc-switch.db')
 if not os.path.exists(db):
     print("未安装 CC Switch，跳过"); raise SystemExit
@@ -208,6 +391,7 @@ cfg = {
     'openai':   re.compile(r'^gpt-'),
     'deepseek': re.compile(r'^deepseek-'),
     'kimi':     re.compile(r'^(kimi-|k3)'),
+    'token_shark': re.compile(r'^(GLM-|Qwen|Deepseek-)'),
 }
 keep = cfg[mode]
 paths = {

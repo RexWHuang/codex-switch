@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **token_shark mode (campus LLM gateway)**: `./codex-switch.sh token_shark` (or double-click `切换到Token鲨.command`). Before switching it reads `codex-token-shark` from the macOS keychain, then runs a gateway preflight (`GET {base_url}/models`, requires HTTP 200 *and* a JSON body) and a protocol probe (`/responses` vs `/chat/completions`, which decides `wire_api`); on failure it aborts and leaves the current config completely untouched — an unreachable gateway is worse than an exhausted quota. The key only ever lives in the keychain, never in the repo or the template; it is injected into `config.toml` (mode 600) at switch time, and `model_catalog_json` is set automatically when `~/.codex/token-shark-models.json` exists. Session provider markers are repainted as `token_shark` through the generic provider-name logic
+
+### Fixed
+
+- **strip invalid `[model_providers.X.auth]` sections on switch**: Codex's model provider has no `auth` field at all, so a "fetch the key via a command" block is silently ignored (no error) — which means "no credentials" and the platform answers 401. The script now removes the whole section line by line (the `args = [...]` array line inside it is not left behind; leaving it produces invalid TOML that stops Codex from starting)
+
 ## [1.6.1] - 2026-10-22
 
 ### Added

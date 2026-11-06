@@ -23,6 +23,7 @@ macOS 下 Codex（ChatGPT 桌面应用内置 CLI）的**多供应商一键切换
 ## 功能
 
 - 一键切换：退出 Codex 应用 → 写入对应配置 → 同步会话显示标记 → 重启应用
+- **Token鲨（校园 LLM 网关）模式**（2026-11-06 新增）：`./codex-switch.sh token_shark`。切换前先从 macOS 钥匙串取密钥，再做网关连通性预检与协议探测（`/responses` 还是 `/chat/completions`），预检不过就中止且**原配置一个字都不动**——网关不通比额度耗尽更糟。密钥只存在钥匙串里，不进仓库、不进模板；切换时注入到 `config.toml`（600 权限）
 - **provider 标记通用化**（2026-11-06）：会话能否打开取决于 `state_5.sqlite` 的 `threads.model_provider`、rollout 里 `session_meta.model_provider` 与配置里的 `model_provider` 三者是否同名，任一不一致桌面端就报 `modelProviderMismatch`（"This chat uses custom, but your current provider is deepseek"），表现为「继续聊天未成功」。脚本原先把 provider 硬编码成 `custom`，改了配置里的名字就会全线失效；现在从配置自动读出实际名称，并把数据库与 rollout 里的标记一起刷成它
 - **只读诊断命令** `./codex-switch.sh check`：打印当前 provider、会话标记分布、认证方式在 GUI 环境是否可用、模型目录状态、桌面端日志中的相关报错；加 `--live` 另做一次真实 API 连通性调用。不改动任何数据
 - **跨供应商续聊自动化**（本项目核心价值，两个实测出来的坑都已内置处理）：
@@ -51,7 +52,8 @@ chmod +x codex-switch.sh *.command codeproxy-kimi.sh
 1. 将 `config-deepseek.toml` 复制到 `~/.codex/switch-config-deepseek.toml`，设置权限为 600，再把 `YOUR_DEEPSEEK_API_KEY` 替换为你的 key；切勿将密钥写进仓库文件。脚本优先读取 `~/.codex/switch-config-<模式>.toml`，不存在时才读取仓库模板；缺少 DeepSeek 密钥时会在退出应用或改写数据前停止。
    这些文件是**完整配置**而不是增量覆盖：要保留现有项目、插件和其他设置，请把它们合入每个使用的模式文件。可将现有 `~/.codex/config.toml` 复制为 `~/.codex/switch-config-openai.toml` 以保留官方模式配置。
 2. 需要 Kimi 的话，先装本地路由（见下节）
-3. 使用：`./codex-switch.sh openai|deepseek|kimi`，或双击对应 `.command`
+3. 需要 Token鲨 的话，把密钥存进钥匙串（见「Token鲨（校园 LLM 网关）模式」一节）
+4. 使用：`./codex-switch.sh openai|deepseek|kimi|token_shark`，或双击对应 `.command`
 
 ## Kimi 本地路由（codeproxy）
 
@@ -64,6 +66,37 @@ chmod +x codex-switch.sh *.command codeproxy-kimi.sh
 5. Codex 桌面版内置 MCP 工具的 schema 会被 Kimi 校验器拒绝（`moonshot flavored json schema` 报错），因此还需 schema 垫片：把 `schema-shim-kimi.py` 复制到 `~/.codex/`，编辑 `com.codexswitch.schema-shim-kimi.plist` 的两处 `REPLACE_WITH_*` 后同样放入 LaunchAgents 并 bootstrap。链路为 Codex → 垫片(8788) → codeproxy(8787) → Kimi；`config-kimi.toml` 的 `base_url` 指向 8788。v1.6.1 起垫片还会清理 input 里完全空的 reasoning / 空 assistant 条目（它们经 codeproxy 转换会生成 `content=null` 的裸 assistant 消息，被 Kimi 拒收：`the message at position N with role 'assistant' must not be empty`，并拖垮自动压缩）；切换脚本在 kimi 分支会自动同步新版垫片并重启服务
 
 之后 `codex-switch.sh kimi` 会自动确保路由在运行。
+
+## Token鲨（校园 LLM 网关）模式
+
+Token鲨 平台的 OpenAI 兼容网关（`http://llm.ahau.edu.cn:4000/v1`）只对平台内网/校园网出口 IP 开放。它和 DeepSeek/Kimi 的最大区别是：**网关地址不是写死的**，要以平台自己返回的为准。
+
+1. 确认网关地址：登录 Token鲨 网页后调用 `GET https://llm.ahau.edu.cn/api/me/api-base-url/`（头 `Authorization: Bearer <网页登录 token>`，token 在浏览器 localStorage 的 `token` 键），返回的 `data.base_url` / `data.chat_completions_url` / `data.models_url` 就是权威地址。把它写进 `config-token-shark.toml` 的 `base_url`。
+2. 密钥放钥匙串（不进仓库、不进模板文件）：
+
+   ```bash
+   security add-generic-password -U -a token-shark -s codex-token-shark -w "<你的 sk- 密钥>"
+   ```
+
+3. 切换：`./codex-switch.sh token_shark`（或双击 `切换到Token鲨.command`）。脚本依次做四件事，任何一步不通过就中止且不动原配置：
+
+   | 步骤 | 失败时的表现 |
+   | --- | --- |
+   | 从钥匙串取 `codex-token-shark` | `钥匙串里没有 codex-token-shark`，退出码 2 |
+   | 预检 `GET {base_url}/models`（要求 HTTP 200 **且**响应体是 JSON） | `网关预检未通过（HTTP 000）`，退出码 3 |
+   | 探测 `/responses` 与 `/chat/completions`，据此决定 `wire_api` | 两者都不存在则退出码 4 |
+   | 注入密钥与模型目录，把会话 provider 标记刷成 `token_shark` | — |
+
+   预检通过后，密钥会被写进 `~/.codex/config.toml`（权限 600），模型目录 `~/.codex/token-shark-models.json` 存在时自动写入 `model_catalog_json`。
+
+**两个必须知道的坑**
+
+- **Codex 的 model provider 没有 `auth` 字段**。`[model_providers.token_shark.auth]` 这种「用命令取密钥」的写法会被**静默忽略**（不报错），结果等于没有凭据，平台直接返回 401。脚本切换时会自动删掉这类段。认证只能用 `experimental_bearer_token = "sk-..."`（内联，桌面端 launchd 环境拿不到 shell 变量，`env_key` 在桌面端不可用）。
+- **网关只对特定出口开放**。校园网 ACL 会把 `4000` 端口直接丢包（SYN 无响应），在 80/81/8080 上返回「Server Unavailable」拦截页，看起来像服务挂了其实是网络策略。实测三条路都堵死：本机直连、经校园网 HTTP 正向代理（只放行 80）、Clash 出口。**这是平台侧的网络策略，客户端无法绕过**，需要平台管理员处理，二选一即可：
+  1. 在 `.93` 主机的 nginx/Caddy 上加一条 `location /v1/ { proxy_pass http://127.0.0.1:4000; }`，客户端改用 `https://llm.ahau.edu.cn/v1`（443 已被放行，不需要动防火墙）；
+  2. 或把 `4000` 放行到校园网段/把出口 IP 加进白名单。
+
+  预检通过后脚本会自动选 `wire_api`：网关有 `/responses` 就用 `responses`（Codex 0.166+ 的原生协议），只有 `/chat/completions` 就退到 `chat`。
 
 ## 第三方模式的浏览器控制（可选）
 
@@ -104,7 +137,7 @@ python3 gen-model-catalog.py --provider custom \
 
 ## 注意事项
 
-- **切换会整体覆盖 `~/.codex/config.toml`**：请把 projects 信任列表、插件、notify 等个性化配置合并进本仓库的三个模板，否则切换后丢失
+- **切换会整体覆盖 `~/.codex/config.toml`**：请把 projects 信任列表、插件、notify 等个性化配置合并进本仓库的四个模板，否则切换后丢失
 - 改写以切换时刻为准，切换后新产生的会话天然是当前模型名，无需处理
 - 官方↔第三方来回切换时模型名会被来回改写（如 gpt-5.6-luna → deepseek-v4-flash → gpt-5.6-sol），归属精度有损失但不影响功能，原始值在 `.bak-model` 里
 - 剥离 reasoning 后这些会话的 reasoning 正文不可恢复（`.bak-reasoning` 有原始文件）；再切回第三方时这些 reasoning 项只剩空 summary，DeepSeek/Kimi 侧对此容错，实测不受影响
@@ -129,6 +162,9 @@ python3 gen-model-catalog.py --provider custom \
 | kimi 模式报 `not a valid moonshot flavored json schema` | 配置绕过了垫片（8788）直连了 codeproxy（8787），检查 `base_url` |
 | kimi 模式报 `the message at position N with role 'assistant' must not be empty`（常伴「压缩已中断」） | 历史里有完全空的 reasoning/assistant 条目，codeproxy 转换出裸 assistant 被 Kimi 拒收。v1.6.1 起垫片自动清理；还在报说明垫片是旧版，重跑切换脚本同步新版垫片即可（会话文件本身不用动） |
 | kimi 模式报 tool_search 不支持 | 配置走了直连而非路由，确认 `~/.codex/config.toml` 的 `base_url = "http://127.0.0.1:8787/v1"` |
+| token_shark 模式报 `网关预检未通过（HTTP 000）` | 网关端口不可达，多半是校园网 ACL 把 `4000` 丢包了。验证：`nc -vz llm.ahau.edu.cn 4000`（超时=被拦，refused=没监听）。这是平台侧网络策略，客户端绕不过去，需要管理员在 443 上反代 `/v1/` 或放行 4000，详见「Token鲨（校园 LLM 网关）模式」一节 |
+| token_shark 模式报 401 | 密钥没注入或已失效。确认钥匙串里有 `codex-token-shark`（`security find-generic-password -a token-shark -s codex-token-shark -w`），并检查 `~/.codex/config.toml` 的 `[model_providers.token_shark]` 段里有 `experimental_bearer_token` |
+| token_shark 模式报 401 但配置里明明有密钥 | 配置里写了 `[model_providers.token_shark.auth]` 这种「命令式取密钥」的段——Codex 没有这个字段，会被静默忽略，等于没有凭据。删掉该段，改用 `experimental_bearer_token` |
 | 第三方模式下浏览器控制报 `Codex auth token is unavailable` | 内嵌浏览器/Computer Use 是 OpenAI 云端服务，第三方模式必然不可用。用「第三方模式的浏览器控制」一节的 WebBridge 桥接方案 |
 | 切换后历史会话不见了 | 会话标记没同步，重跑一次切换脚本即可（脚本会翻转 `state_5.sqlite` 的 provider 标记） |
 | 切换后对话内容停在旧时间、最新消息不显示 | GUI 投影缓存（`thread_history_1.sqlite`）按字节偏移索引 rollout 文件，脚本改写后偏移失效——脚本已自动失效受影响线程的投影；旧版本脚本可手动删除该库中对应 thread_id 的投影行（或整表清空），重启 app 自动重建，数据在 jsonl 里不会丢 |
@@ -148,12 +184,12 @@ python3 gen-model-catalog.py --provider custom \
 
 ## 文件清单
 
-- `codex-switch.sh` — 切换主脚本（`openai|deepseek|kimi` 切换，`check` 只读诊断）
+- `codex-switch.sh` — 切换主脚本（`openai|deepseek|kimi|token_shark` 切换，`check` 只读诊断）
 - `check-provider.py` — 供应商状态诊断（切换时自动可用，也可独立运行）
 - `gen-model-catalog.py` — 生成第三方供应商的 Codex 模型目录
 - `remap-history-base.py` — 分叉会话 history_base 偏移重映射（切换时自动调用，可独立运行）
 - `trim-rollout-output.py` — 巨型会话智能修剪：裁旧工具输出/粘贴大图，保对话文字（需配合 remap 使用）
-- `config-openai.toml` / `config-deepseek.toml` / `config-kimi.toml` — 三套配置模板
+- `config-openai.toml` / `config-deepseek.toml` / `config-kimi.toml` / `config-token-shark.toml` — 四套配置模板
 - `切换到*.command` — 双击入口
 - `codeproxy-kimi.sh` + `com.codexswitch.codeproxy-kimi.plist` — Kimi 本地路由模板
 - `schema-shim-kimi.py` + `com.codexswitch.schema-shim-kimi.plist` — Kimi schema 修正垫片模板（修 $ref 兄弟字段；v1.6.1 起还会清理会产生「空 assistant」的空 reasoning/空 assistant 条目）

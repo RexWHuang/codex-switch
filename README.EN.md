@@ -41,6 +41,7 @@ Built for a real workflow: when your GPT quota runs out or expires, fall back to
 ## Features
 
 - One-click switch: quit Codex app → write config → sync session visibility flags → relaunch
+- **Token Shark (campus LLM gateway) mode** (added 2026-11-06): `./codex-switch.sh token_shark`. Before switching it reads the key from the macOS keychain, then runs a gateway preflight and a protocol probe (`/responses` vs `/chat/completions`); if the preflight fails it aborts and **leaves the current config untouched** — an unreachable gateway is worse than an exhausted quota. The key only ever lives in the keychain, never in the repo or the template; it is injected into `config.toml` (mode 600) at switch time
 - **Automated cross-provider resume** (the core value — two empirically discovered pitfalls, both handled):
   1. **Model-name rewriting**: on resume, codex's pre-sampling compaction pins the model name recorded in the session metadata, ignoring your current config. Cross-provider resumes get rejected with `invalid_request_error`. On every switch, the script updates known model metadata fields in historical rollout files to the target provider's model name, leaving unrelated `model` fields intact.
   2. **Third-party residue cleanup** (only when switching to OpenAI): history items produced by a third-party direct `/responses` endpoint trip four official-API validations — a reasoning `content` array (`array_above_max_length`), a locally Fernet-encrypted `encrypted_content` (`invalid_encrypted_content`), a third-party `rs_` reasoning id (`Item with id 'rs_...' not found`, since the official store=false has no record), and `tool_`-prefixed tool-call ids (`invalid_id_prefix`; the official API requires `fc`). When switching to openai, the script recursively strips reasoning content/encrypted_content/id and rewrites tool-call id prefixes to `fc` (including items nested in `compacted` payloads); OpenAI receives summaries only and resume works.
@@ -80,6 +81,33 @@ Recent Codex versions only speak the Responses API and forcibly attach a `tool_s
 5. Codex Desktop's built-in MCP tool schemas are rejected by Kimi's validator (`moonshot flavored json schema` error), so a schema shim is also required: copy `schema-shim-kimi.py` to `~/.codex/`, edit the two `REPLACE_WITH_*` placeholders in `com.codexswitch.schema-shim-kimi.plist`, install it under LaunchAgents and bootstrap. The chain is Codex → shim(8788) → codeproxy(8787) → Kimi; `config-kimi.toml`'s `base_url` points at 8788. Since v1.6.1 the shim also drops fully empty reasoning / empty assistant items from the input (they would otherwise be converted by codeproxy into a bare assistant message with `content=null`, which Kimi rejects: `the message at position N with role 'assistant' must not be empty`, also breaking auto-compaction); the switch script's kimi branch syncs the new shim and restarts the service automatically
 
 After that, `codex-switch.sh kimi` ensures the proxy is running automatically.
+
+## Token Shark (campus LLM gateway) mode
+
+Token Shark's OpenAI-compatible gateway (`http://llm.ahau.edu.cn:4000/v1`) is only reachable from the platform's internal / campus egress IPs. Unlike DeepSeek or Kimi, **the gateway address is not fixed** — take it from the platform itself:
+
+1. Get the authoritative address: while logged in to the Token Shark web console, call `GET https://llm.ahau.edu.cn/api/me/api-base-url/` with header `Authorization: Bearer <web login token>` (the token lives in the browser's `localStorage.token`). Put the returned `data.base_url` into `config-token-shark.toml`'s `base_url`.
+2. Store the API key in the macOS keychain (never in the repo, never in the template):
+
+   ```bash
+   security add-generic-password -U -a token-shark -s codex-token-shark -w "<your sk- key>"
+   ```
+
+3. Switch: `./codex-switch.sh token_shark` (or double-click `切换到Token鲨.command`). The script runs four steps and aborts without touching the current config if any of them fails:
+
+   | Step | On failure |
+   | --- | --- |
+   | Read `codex-token-shark` from the keychain | `钥匙串里没有 codex-token-shark`, exit code 2 |
+   | Preflight `GET {base_url}/models` (requires HTTP 200 **and** a JSON body) | `网关预检未通过（HTTP 000）`, exit code 3 |
+   | Probe `/responses` and `/chat/completions` to pick `wire_api` | exit code 4 if neither exists |
+   | Inject key + model catalog, repaint session provider markers as `token_shark` | — |
+
+   After a successful preflight the key is written into `~/.codex/config.toml` (mode 600), and `model_catalog_json` is set automatically when `~/.codex/token-shark-models.json` exists.
+
+**Two traps worth knowing**
+
+- **Codex's model provider has no `auth` field.** A `[model_providers.token_shark.auth]` block that fetches the key via a command is **silently ignored** (no error), which means "no credentials at all" and the platform answers 401. The switch script strips such sections automatically. Use `experimental_bearer_token = "sk-..."` instead — the desktop app is launched by launchd and cannot see variables exported in your shell, so `env_key` does not work there.
+- **The gateway is only open to specific egress paths.** The campus ACL drops TCP packets to port `4000` (no SYN response) and answers HTTP on 80/81/8080 with a "Server Unavailable" block page, which looks like a dead service but is a network policy. Three routes were verified as dead ends: direct from this machine, the campus HTTP forward proxy (port 80 only) and the Clash egress. **This is a platform-side policy that no client-side setting can bypass**; an administrator has to either add an nginx/Caddy `location /v1/ { proxy_pass http://127.0.0.1:4000; }` on the `.93` host (443 is already allowed, so clients can then use `https://llm.ahau.edu.cn/v1`), or open port 4000 to the campus network.
 
 ## Browser control in third-party mode (optional)
 
@@ -143,7 +171,7 @@ Generate a catalog from `codex debug models` output, split it per provider, and 
 - `codex-switch.sh` — main switch script
 - `remap-history-base.py` — forked-session history_base offset remapping (auto-called on switch, runnable standalone)
 - `trim-rollout-output.py` — smart trimming of giant sessions: cuts old tool output / pasted images, keeps conversation text (use together with remap)
-- `config-openai.toml` / `config-deepseek.toml` / `config-kimi.toml` — config templates
+- `config-openai.toml` / `config-deepseek.toml` / `config-kimi.toml` / `config-token-shark.toml` — config templates
 - `切换到*.command` — double-click launchers
 - `codeproxy-kimi.sh` + `com.codexswitch.codeproxy-kimi.plist` — Kimi local proxy templates
 - `schema-shim-kimi.py` + `com.codexswitch.schema-shim-kimi.plist` — Kimi schema shim templates (fixes $ref sibling fields; since v1.6.1 also drops empty reasoning / empty assistant items that would otherwise become bare assistant messages)

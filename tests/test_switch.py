@@ -5,6 +5,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import tomllib
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -215,6 +216,162 @@ class SwitchingTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             self.assertIn('与当前配置', result.stdout)
             self.assertIn('modelProviderMismatch', result.stdout)
+
+
+# ---- token_shark（校园 LLM 网关）模式 ----
+
+STUB_CURL = r'''#!/bin/sh
+out=""; hdr=""; url=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2;;
+    -D) hdr="$2"; shift 2;;
+    -w|-X|-H|-d|--max-time) shift 2;;
+    *) url="$1"; shift;;
+  esac
+done
+case "$url" in
+  */models) code="${STUB_MODELS_CODE:-200}"; body='{"object":"list","data":[]}';;
+  */responses) code="${STUB_RESPONSES_CODE:-400}"; body='{"error":"probe"}';;
+  */chat/completions) code="${STUB_CHAT_CODE:-404}"; body='{"error":"probe"}';;
+  *) code="${STUB_OTHER_CODE:-404}"; body='{}';;
+esac
+[ -n "$hdr" ] && printf 'HTTP/1.1 %s\r\nContent-Type: application/json\r\n\r\n' "$code" > "$hdr"
+[ -n "$out" ] && printf '%s' "$body" > "$out"
+printf '%s' "$code"
+'''
+
+STUB_SECURITY = r'''#!/bin/sh
+if [ "$1" = "find-generic-password" ]; then
+  printf 'sk-stub-token'
+  exit 0
+fi
+exit 1
+'''
+
+
+class TokenSharkTest(unittest.TestCase):
+    """Token鲨 模式：钥匙串取密钥、网关预检、协议探测、provider 标记同步。"""
+
+    def _prepare(self, root):
+        home = root / 'codex'
+        (home / 'sessions').mkdir(parents=True)
+        (home / 'switch-config-token-shark.toml').write_text(
+            (ROOT / 'config-token-shark.toml').read_text())
+        (home / 'token-shark-models.json').write_text('{"models": []}')
+        bin_dir = root / 'bin'
+        bin_dir.mkdir()
+        for name, body in (('osascript', '#!/bin/sh\nexit 0\n'),
+                           ('sleep', '#!/bin/sh\nexit 0\n'),
+                           ('open', '#!/bin/sh\nexit 0\n'),
+                           ('security', STUB_SECURITY),
+                           ('curl', STUB_CURL)):
+            path = bin_dir / name
+            path.write_text(body)
+            path.chmod(0o755)
+        env = dict(os.environ, HOME=str(root), CODEX_HOME=str(home),
+                   PATH=str(bin_dir) + os.pathsep + os.environ['PATH'])
+        return home, env
+
+    def test_switch_injects_key_and_aligns_provider_markers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home, env = self._prepare(root)
+            db = sqlite3.connect(home / 'state_5.sqlite')
+            db.execute('create table threads (model_provider text, model text, reasoning_effort text)')
+            db.execute("insert into threads values ('custom', 'deepseek-flash', 'high')")
+            db.commit()
+            db.close()
+            rollout = home / 'sessions' / 'rollout.jsonl'
+            rollout.write_text(json.dumps({
+                'type': 'session_meta',
+                'payload': {
+                    'model_provider': 'custom',
+                    'base_instructions': {'provenance': {'model': 'deepseek-flash'}},
+                },
+            }, separators=(',', ':')) + '\n')
+            result = subprocess.run(['bash', str(ROOT / 'codex-switch.sh'), 'token_shark'],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            config = (home / 'config.toml').read_text()
+            # 密钥来自钥匙串，不是模板里的占位符
+            self.assertIn('experimental_bearer_token = "sk-stub-token"', config)
+            self.assertNotIn('TOKEN_SHARK_API_KEY', config)
+            # 模型目录指向用户目录下的真实文件
+            self.assertIn(f'model_catalog_json = "{home / "token-shark-models.json"}"', config)
+            # 协议探测：/responses 存在 -> wire_api = responses
+            self.assertIn('wire_api = "responses"', config)
+            # provider 标记全部同步成 token_shark
+            with sqlite3.connect(home / 'state_5.sqlite') as db:
+                providers = {row[0] for row in db.execute('select model_provider from threads')}
+            self.assertEqual(providers, {'token_shark'})
+            payload = json.loads(rollout.read_text())['payload']
+            self.assertEqual(payload['model_provider'], 'token_shark')
+
+    def test_switch_falls_back_to_chat_completions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home, env = self._prepare(root)
+            env['STUB_RESPONSES_CODE'] = '404'
+            env['STUB_CHAT_CODE'] = '400'
+            result = subprocess.run(['bash', str(ROOT / 'codex-switch.sh'), 'token_shark'],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('wire_api = "chat"', (home / 'config.toml').read_text())
+
+    def test_unreachable_gateway_keeps_original_config(self):
+        """网关不通必须中止：原配置保持不变，也不留下备份。"""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home, env = self._prepare(root)
+            env['STUB_MODELS_CODE'] = '000'
+            (home / 'config.toml').write_text('model = "original"\n')
+            result = subprocess.run(['bash', str(ROOT / 'codex-switch.sh'), 'token_shark'],
+                                    env=env, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('网关', result.stderr)
+            self.assertEqual((home / 'config.toml').read_text(), 'model = "original"\n')
+            self.assertFalse((home / 'config.toml.bak-switch').exists())
+
+    def test_missing_keychain_entry_stops_before_changing_config(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home, env = self._prepare(root)
+            (root / 'bin' / 'security').write_text('#!/bin/sh\nexit 1\n')
+            (root / 'bin' / 'security').chmod(0o755)
+            (home / 'config.toml').write_text('model = "original"\n')
+            result = subprocess.run(['bash', str(ROOT / 'codex-switch.sh'), 'token_shark'],
+                                    env=env, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('钥匙串', result.stderr)
+            self.assertEqual((home / 'config.toml').read_text(), 'model = "original"\n')
+
+    def test_auth_section_is_stripped(self):
+        """[model_providers.X.auth] 不是 Codex 支持的字段，留着等于没有凭据。
+
+        段里通常还有 args = [...] 这样的数组行（行首带方括号），
+        用正则一刀切会把数组行留下来，写成非法 TOML，Codex 直接起不来。
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home, env = self._prepare(root)
+            template = (home / 'switch-config-token-shark.toml').read_text()
+            template += ('\n[model_providers.token_shark.auth]\n'
+                         'command = "/usr/bin/security"\n'
+                         'args = ["find-generic-password", "-a", "token-shark",'
+                         ' "-s", "codex-token-shark", "-w"]\n'
+                         'timeout_ms = 5000\n'
+                         'refresh_interval_ms = 0\n')
+            (home / 'switch-config-token-shark.toml').write_text(template)
+            result = subprocess.run(['bash', str(ROOT / 'codex-switch.sh'), 'token_shark'],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            rendered = (home / 'config.toml').read_text()
+            self.assertNotIn('token_shark.auth', rendered)
+            self.assertNotIn('find-generic-password', rendered)
+            self.assertNotIn('refresh_interval_ms', rendered)
+            # 删干净之后必须仍是合法 TOML
+            tomllib.loads(rendered)
 
 
 if __name__ == '__main__':
