@@ -20,12 +20,17 @@ SHIM_LABEL="${CODEX_SWITCH_SHIM_LABEL:-com.codexswitch.schema-shim-kimi}"
 CODEX_APP="${CODEX_SWITCH_APP:-ChatGPT}"
 CODEX_CLI="${CODEX_SWITCH_CLI:-/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex}"
 
-if [ "$MODE" != "openai" ] && [ "$MODE" != "deepseek" ] && [ "$MODE" != "kimi" ]; then
-  echo "用法: $0 openai|deepseek|kimi"; exit 1
+if [ "$MODE" != "openai" ] && [ "$MODE" != "deepseek" ] && [ "$MODE" != "kimi" ] && [ "$MODE" != "check" ]; then
+  echo "用法: $0 openai|deepseek|kimi|check"; exit 1
 fi
 
 CONFIG="$CODEX_HOME/switch-config-$MODE.toml"
 [ -f "$CONFIG" ] || CONFIG="$DIR/config-$MODE.toml"
+if [ "$MODE" = "check" ]; then
+  # 只读诊断：定位「桌面端打不开会话」等问题的根因，不改动任何数据
+  shift
+  exec python3 "$DIR/check-provider.py" --home "$CODEX_HOME" --dir "$DIR" "$@"
+fi
 if [ "$MODE" = "deepseek" ] && grep -q 'YOUR_DEEPSEEK_API_KEY' "$CONFIG"; then
   echo "DeepSeek 密钥尚未配置：请使用 $CODEX_HOME/switch-config-deepseek.toml" >&2
   exit 1
@@ -84,14 +89,24 @@ echo "同步会话显示标记与默认模型..."
 # 预设各模式默认模型与强度，切换后无需在界面重新选择（2026-09-18 新增）：
 # 除新会话默认（config.toml 的 model 字段）外，还需把 threads 表里每个会话钉死的
 # model/reasoning_effort 一并翻转，否则打开旧会话仍用旧模型执行失败。
-if [ "$MODE" = "openai" ]; then
-  FROM="custom"; TO="openai"
-else
-  FROM="openai"; TO="custom"
-fi
-python3 - "$CODEX_HOME" "$FROM" "$TO" "$DEF_MODEL" "$DEF_EFFORT" <<'PYEOF'
+#
+# provider 名称必须与目标配置里的 model_provider 完全一致，否则桌面端 app-server
+# 会拒绝打开会话并报 modelProviderMismatch：
+#   "This chat uses custom, but your current provider is deepseek."
+# 会话标记与配置两处名字只要有一个对不上，桌面端就是「继续聊天未成功」。
+# 因此这里从配置模板里读出实际使用的 provider 名（第三方模式通常是 custom，
+# 但用户可能改成 deepseek / kimi 等自定义名），并把所有会话标记统一刷成它。
+TARGET_PROVIDER=$(python3 - "$CONFIG" <<'PYEOF'
+import re, sys
+text = open(sys.argv[1], encoding='utf-8').read()
+match = re.search(r'^model_provider\s*=\s*"([^"\n]+)"', text, re.M)
+print(match.group(1) if match else 'openai')
+PYEOF
+)
+echo "目标 provider 名称: $TARGET_PROVIDER"
+python3 - "$CODEX_HOME" "$TARGET_PROVIDER" "$DEF_MODEL" "$DEF_EFFORT" <<'PYEOF'
 import sqlite3, sys, os, subprocess, time
-home, frm, to, model, effort = sys.argv[1:]
+home, to, model, effort = sys.argv[1:]
 db = os.path.join(home, 'state_5.sqlite')
 if not os.path.exists(db):
     print("未找到 state_5.sqlite，跳过"); raise SystemExit
@@ -127,8 +142,14 @@ for root in ('sessions', 'archived_sessions'):
                 if os.path.exists(temp):
                     os.remove(temp)
 print(f'已解压 {decompressed} 个会话并保留压缩备份')
-cur = con.execute("update threads set model_provider=? where model_provider=?", (to, frm))
-print(f"已更新 {cur.rowcount} 条会话标记: {frm} -> {to}")
+# 把所有会话的 provider 标记统一刷成目标名称：不只是 openai <-> custom 这一对，
+# 任何与目标不符的标记都会让桌面端拒绝打开该会话。
+before = dict(con.execute('select model_provider, count(*) from threads group by model_provider').fetchall())
+cur = con.execute('update threads set model_provider=? where model_provider<>?', (to, to))
+if before.get(to):
+    print(f"已更新 {cur.rowcount} 条会话标记 -> {to}（该名称原有 {before[to]} 条）")
+else:
+    print(f"已更新 {cur.rowcount} 条会话标记 -> {to}（原分布 {before}）")
 cur2 = con.execute("update threads set model=?, reasoning_effort=?", (model, effort))
 print(f"已预设 {cur2.rowcount} 条会话的默认模型: {model}（强度 {effort}）")
 con.commit(); con.close()
@@ -161,20 +182,27 @@ MARKER_REASONING="$CODEX_HOME/.switch-rewrite-marker-reasoning"
 SINCE_MODEL=$(cat "$MARKER_MODEL" 2>/dev/null || echo 0)
 SINCE_REASONING=$(cat "$MARKER_REASONING" 2>/dev/null || echo 0)
 # 每次切换供应商都必须重新扫描：未修改的旧会话也可能属于另一供应商。
-if [ "$(cat "$CODEX_HOME/.switch-model-mode" 2>/dev/null || true)" != "$MODE:$DEF_MODEL" ]; then
+# 标记里带上 provider 名称——只改配置里的 provider 名字（如 custom 改成 deepseek）
+# 也必须触发全量扫描，否则 rollout 里的旧 provider 标记不会被改写。
+if [ "$(cat "$CODEX_HOME/.switch-model-mode" 2>/dev/null || true)" != "$MODE:$DEF_MODEL:$TARGET_PROVIDER" ]; then
   SINCE_MODEL=0
 fi
 NOW_TS=$(python3 -c 'import time; print(time.time())')
 
-echo "改写历史会话模型名（解决续聊 compact 钉死模型名问题）..."
+echo "改写历史会话模型名与 provider 标记（解决续聊 compact 钉死模型名问题）..."
 # codex 续聊时的 pre-sampling compact 使用会话 rollout 元数据里记录的模型名，
 # 与当前配置无关。跨供应商续聊时对方 API 不认识该名字会报 invalid_request_error
 # （在 codex 0.153.4 实测确认）。这里把历史里的模型名统一改写成目标供应商
 # 的模型名。只动模型归属元数据，会话内容不受影响；每个文件首次改写前留 .bak-model。
-python3 - "$MODE" "$CODEX_HOME" "$SINCE_MODEL" "$DEF_MODEL" <<'PYEOF'
+#
+# rollout 的 session_meta.model_provider 同样要跟着改：app-server 打开会话时会
+# 拿它和当前配置的 model_provider 比对，不一致就报 modelProviderMismatch
+# （"This chat uses openai, but your current provider is deepseek"），
+# 桌面端表现为「继续聊天未成功」。只改数据库 threads 表是不够的。
+python3 - "$MODE" "$CODEX_HOME" "$SINCE_MODEL" "$DEF_MODEL" "$TARGET_PROVIDER" <<'PYEOF'
 import json, os, re, sys, shutil
 
-mode, home, since, default = sys.argv[1], sys.argv[2], float(sys.argv[3]), sys.argv[4]
+mode, home, since, default, provider = sys.argv[1], sys.argv[2], float(sys.argv[3]), sys.argv[4], sys.argv[5]
 # 各供应商认识的模型名（不在白名单里的会被改写成默认名，按需修改）
 cfg = {
     'openai':   re.compile(r'^gpt-'),
@@ -205,6 +233,14 @@ def rewrite(line):
         if isinstance(name, str) and not keep.match(name):
             names.add(name)
             node[path[-1]] = default
+    # provider 标记与当前配置对齐，否则 app-server 拒绝打开该会话
+    if item.get('type') == 'session_meta':
+        payload = item.get('payload')
+        if isinstance(payload, dict):
+            current = payload.get('model_provider')
+            if isinstance(current, str) and current != provider:
+                names.add(f'provider:{current}')
+                payload['model_provider'] = provider
     return (json.dumps(item, ensure_ascii=False, separators=(',', ':')) + '\n', names) if names else (line, names)
 
 roots = [os.path.join(home, 'sessions'), os.path.join(home, 'archived_sessions')]
@@ -246,9 +282,16 @@ for root in roots:
                 continue
 
 if changed_files:
-    print(f"已改写 {changed_files} 个会话文件: {sorted(changed_names)} -> {default}")
+    models_changed = sorted(n for n in changed_names if not n.startswith('provider:'))
+    providers_changed = sorted(n for n in changed_names if n.startswith('provider:'))
+    detail = []
+    if models_changed:
+        detail.append(f"模型名 {models_changed} -> {default}")
+    if providers_changed:
+        detail.append(f"provider 标记 {[p.split(':', 1)[1] for p in providers_changed]} -> {provider}")
+    print(f"已改写 {changed_files} 个会话文件: " + "；".join(detail))
 else:
-    print("无需改写（历史会话模型名均已匹配）")
+    print("无需改写（历史会话模型名与 provider 标记均已匹配）")
 
 # 记录被改写的线程 id，供最后统一失效 GUI 投影缓存
 uids = re.findall(r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$', '\n'.join(changed_paths), re.M)
@@ -257,7 +300,7 @@ if uids:
         fh.write('\n'.join(uids) + '\n')
 PYEOF
 echo "$NOW_TS" > "$MARKER_MODEL"
-echo "$MODE:$DEF_MODEL" > "$CODEX_HOME/.switch-model-mode"
+echo "$MODE:$DEF_MODEL:$TARGET_PROVIDER" > "$CODEX_HOME/.switch-model-mode"
 
 if [ "$MODE" = "openai" ]; then
   echo "清理第三方会话残留（解决官方续聊校验报错）..."

@@ -1,5 +1,9 @@
 # DeepSeek 直连模式配置模板
 # DeepSeek 的 /responses 端点实测兼容新版 Codex 请求（含 tool_search），无需本地路由。
+#
+# provider 名称（model_provider）可以自定义，但必须与 [model_providers.<同名>] 段一致。
+# 切换脚本会把这个名字同步到所有历史会话的标记里；名字对不上时桌面端会报
+# "This chat uses X, but your current provider is Y"，表现为「继续聊天未成功」。
 
 model_provider = "custom"
 model = "deepseek-flash"              # 或 deepseek-v4-pro
@@ -7,9 +11,13 @@ model_reasoning_effort = "high"
 disable_response_storage = true
 approval_policy = "on-request"
 sandbox_mode = "workspace-write"
+web_search = "disabled"               # DeepSeek 不支持 Codex 内置联网搜索
 
-# 可选：模型选择器目录，只放 DeepSeek 的模型，避免在 DeepSeek 模式下错选别家模型。
-# 生成方法见 README「模型目录分家」一节。
+# 模型选择器目录，只放 DeepSeek 的模型，避免在 DeepSeek 模式下错选别家模型，
+# 也避免目标模型退回 fallback metadata（会报 "Model metadata for `deepseek-flash` not found"）。
+# 生成：python3 gen-model-catalog.py --provider custom \
+#          --config ~/.codex/switch-config-deepseek.toml \
+#          --out ~/.codex/model-catalog-deepseek.json
 # model_catalog_json = "/absolute/path/to/model-catalog-deepseek.json"
 
 [model_providers.custom]
@@ -17,4 +25,6 @@ name = "deepseek"
 base_url = "https://api.deepseek.com"
 wire_api = "responses"
 requires_openai_auth = true
+# 密钥内联而非 env_key：桌面端由 launchd 启动，拿不到 shell 里 export 的变量，
+# 用 env_key 会报 "Missing environment variable: DEEPSEEK_API_KEY"（只影响桌面端，CLI 正常）。
 experimental_bearer_token = "YOUR_DEEPSEEK_API_KEY"   # 替换为你的 sk-... key

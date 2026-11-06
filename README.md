@@ -23,6 +23,8 @@ macOS 下 Codex（ChatGPT 桌面应用内置 CLI）的**多供应商一键切换
 ## 功能
 
 - 一键切换：退出 Codex 应用 → 写入对应配置 → 同步会话显示标记 → 重启应用
+- **provider 标记通用化**（2026-11-06）：会话能否打开取决于 `state_5.sqlite` 的 `threads.model_provider`、rollout 里 `session_meta.model_provider` 与配置里的 `model_provider` 三者是否同名，任一不一致桌面端就报 `modelProviderMismatch`（"This chat uses custom, but your current provider is deepseek"），表现为「继续聊天未成功」。脚本原先把 provider 硬编码成 `custom`，改了配置里的名字就会全线失效；现在从配置自动读出实际名称，并把数据库与 rollout 里的标记一起刷成它
+- **只读诊断命令** `./codex-switch.sh check`：打印当前 provider、会话标记分布、认证方式在 GUI 环境是否可用、模型目录状态、桌面端日志中的相关报错；加 `--live` 另做一次真实 API 连通性调用。不改动任何数据
 - **跨供应商续聊自动化**（本项目核心价值，两个实测出来的坑都已内置处理）：
   1. **模型名改写**：codex 续聊时的 pre-sampling compact 钉死使用会话元数据里记录的模型名，与当前配置无关。跨供应商续聊会被对方 API 以 `invalid_request_error` 拒绝。脚本在每次切换时把历史会话 rollout 里的 `"model":"..."` 批量改写为目标供应商的模型名。
   2. **第三方历史残留清理**（仅切回官方时）：第三方直连 `/responses` 产生的历史项会撞上官方 API 四重校验——reasoning 的 `content` 数组（`array_above_max_length`）、本地 Fernet `encrypted_content`（`invalid_encrypted_content`）、reasoning 的 `rs_` id（`Item with id 'rs_...' not found`，官方 store=false 无记录）、工具调用 `tool_` 前缀 id（`invalid_id_prefix`，官方要求 `fc` 开头）。切到 openai 时脚本递归剥离 reasoning 的 content/encrypted_content/id 并把工具 id 前缀改为 `fc`，官方只收到 summary，可正常续聊。
@@ -80,9 +82,25 @@ Codex 的内嵌浏览器 / Computer Use 是 OpenAI 云端服务，第三方模�
 
 ## 模型目录分家（可选但推荐）
 
-若两套第三方配置共用一份模型目录（`model_catalog_json`），Codex 界面的模型选择器会把两家的模型全列出来——在 DeepSeek 模式选到 Kimi 模型会请求被拒。建议拆成两份各指各的：DeepSeek 模式只显示 `deepseek-v4-flash / deepseek-v4-pro`，Kimi 模式只显示 `kimi-for-coding / k3` 等。
+若两套第三方配置共用一份模型目录（`model_catalog_json`），Codex 界面的模型选择器会把两家的模型全列出来——在 DeepSeek 模式选到 Kimi 模型会请求被拒。建议拆成两份各指各的：DeepSeek 模式只显示 `deepseek-flash / deepseek-v4-pro`，Kimi 模式只显示 `kimi-for-coding / k3` 等。
 
-目录文件可用 `codex debug models` 的输出生成，再按供应商拆分后分别在 `config-deepseek.toml` / `config-kimi.toml` 里用 `model_catalog_json` 指向。
+目录文件可用 `gen-model-catalog.py` 自动生成——它从供应商的 `/models` 接口取真实清单与上下文长度，
+再套用 Codex 自带目录的字段模板：
+
+```bash
+python3 gen-model-catalog.py --provider custom \
+    --config ~/.codex/switch-config-deepseek.toml \
+    --out ~/.codex/model-catalog-deepseek.json
+```
+
+生成后在对应配置里加 `model_catalog_json = "/绝对路径/model-catalog-deepseek.json"`。
+
+不配目录也能跑，但目标模型会退回 fallback metadata（控制台报 `Model metadata for \`deepseek-flash\` not found`），
+界面的模型选择器里也只有官方模型。
+
+> 两个已踩过的坑（脚本已规避）：目录里的 `tool_mode = "code_mode_only"` 会让 Codex 改用自定义
+> `exec` 工具，第三方 Responses 端点直接拒绝（`Unsupported custom tool: 'exec'`）；`web_search_tool_type`
+> 不能为 null，否则目录解析直接失败。
 
 ## 注意事项
 
@@ -94,8 +112,16 @@ Codex 的内嵌浏览器 / Computer Use 是 OpenAI 云端服务，第三方模�
 
 ## 故障排查
 
+先跑 `./codex-switch.sh check` 做只读诊断——它会打印当前生效的 provider、会话标记分布、
+认证方式是否在 GUI 环境可用、模型目录状态，以及桌面端日志里的相关报错，不改动任何数据。
+加 `--live` 会额外做一次真实 API 连通性调用。
+
 | 症状 | 检查 |
 | --- | --- |
+| 桌面端「继续聊天未成功」，提示 `This chat uses custom, but your current provider is deepseek`（`modelProviderMismatch`） | 会话标记与配置里的 provider 名称不一致。app-server 打开会话时会把 `state_5.sqlite` 的 `threads.model_provider` 和 rollout 里 `session_meta.model_provider` 同当前配置的 `model_provider` 三者比对，任一不一致就拒绝打开。常见于改了配置里的 `model_provider` 名字却没重跑切换。跑 `./codex-switch.sh check` 看分布，重跑 `./codex-switch.sh <模式>` 同步（新版脚本会把数据库与 rollout 里的标记一起刷成配置里的名字） |
+| 桌面端报 `Missing environment variable: DEEPSEEK_API_KEY`，但 CLI 正常 | 用了 `env_key` 认证。桌面端由 launchd 启动，拿不到 shell 里 `export` 的变量，只有 CLI 能读到。改用内联 `experimental_bearer_token = "sk-..."`（脚本已对 config.toml 设 600 权限），或 `launchctl setenv DEEPSEEK_API_KEY <值>` 后重启 App |
+| 界面选不到 DeepSeek 模型，或报 `Model metadata for \`deepseek-flash\` not found` | 没配模型目录，目标模型退回 fallback metadata。用 `python3 gen-model-catalog.py --provider custom --config ~/.codex/switch-config-deepseek.toml --out ~/.codex/model-catalog-deepseek.json` 生成，并在配置里加 `model_catalog_json` 指向它 |
+| 第三方模式报 `Unsupported custom tool: 'exec'. Only 'apply_patch' is supported.` | 模型目录里带 `tool_mode = "code_mode_only"`，会让 Codex 改用自定义 exec 工具，第三方 Responses 端点不接受。`gen-model-catalog.py` 生成的目录已剔除该字段 |
 | 恢复对话失败：`cutoff byte offset is past the source rollout`；或打开会话反复重新连接、提示无法打开文件 | 分叉会话文件头内嵌的 `history_base` 字节偏移越界：历史改写改变了源文件长度，或 App 0.163.x 把源文件压成 `.jsonl.zst` 后按压缩后字节校验。运行 `python3 remap-history-base.py ~/.codex`（自动解压压缩源并重映射）后重启 App；新版脚本已在每次切换后自动处理 |
 | 续聊报 `Your input exceeds the context window of this model` | 会话历史全量回放超模型窗口，运行 `python3 trim-rollout-output.py <该会话的 rollout.jsonl>` 修剪旧工具输出（对话文字不动、自动备份），再跑 `python3 remap-history-base.py ~/.codex` 修复分叉偏移，重启 App |
 | kimi 模式报 Connection refused | `launchctl print gui/$(id -u)/com.codexswitch.codeproxy-kimi` 看状态；`tail ~/.codex/codeproxy-kimi.log` 看日志；`launchctl kickstart -k gui/$(id -u)/com.codexswitch.codeproxy-kimi` 重启 |
@@ -122,7 +148,9 @@ Codex 的内嵌浏览器 / Computer Use 是 OpenAI 云端服务，第三方模�
 
 ## 文件清单
 
-- `codex-switch.sh` — 切换主脚本
+- `codex-switch.sh` — 切换主脚本（`openai|deepseek|kimi` 切换，`check` 只读诊断）
+- `check-provider.py` — 供应商状态诊断（切换时自动可用，也可独立运行）
+- `gen-model-catalog.py` — 生成第三方供应商的 Codex 模型目录
 - `remap-history-base.py` — 分叉会话 history_base 偏移重映射（切换时自动调用，可独立运行）
 - `trim-rollout-output.py` — 巨型会话智能修剪：裁旧工具输出/粘贴大图，保对话文字（需配合 remap 使用）
 - `config-openai.toml` / `config-deepseek.toml` / `config-kimi.toml` — 三套配置模板
