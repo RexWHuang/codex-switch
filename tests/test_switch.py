@@ -89,8 +89,19 @@ class SwitchingTest(unittest.TestCase):
             sessions.mkdir(parents=True)
             (home / 'switch-config-deepseek.toml').write_text(
                 (ROOT / 'config-deepseek.toml').read_text().replace('YOUR_DEEPSEEK_API_KEY', 'test-key'))
-            plain = sessions / 'rollout.jsonl'
-            plain.write_text('{"type":"turn_context","payload":{"model":"gpt-6-luna"}}\n')
+            thread_id = '12345678-1234-1234-1234-123456789abc'
+            plain = sessions / f'rollout-2026-01-01-{thread_id}.jsonl'
+            lines = [
+                '{"ordinal":0,"type":"session_meta","payload":{}}\n',
+                '{"ordinal":1,"type":"turn_context","payload":{"model":"gpt-6-luna"}}\n',
+                '{"ordinal":2,"type":"event_msg","payload":{}}\n',
+            ]
+            plain.write_text(''.join(lines))
+            fork = sessions / f'rollout-2026-01-02-{thread_id}.jsonl'
+            fork.write_text(json.dumps({'type': 'session_meta', 'payload': {'history_base': {
+                'thread_id': thread_id, 'end_ordinal_exclusive': 2,
+                'end_byte_offset': len(''.join(lines[:2]).encode()),
+            }}}, separators=(',', ':')) + '\n')
             subprocess.run(['zstd', '-q', '--rm', str(plain)], check=True)
             compressed = Path(str(plain) + '.zst')
             with sqlite3.connect(home / 'state_5.sqlite') as db:
@@ -106,7 +117,10 @@ class SwitchingTest(unittest.TestCase):
                        PATH=str(bin_dir) + os.pathsep + os.environ['PATH'])
             subprocess.run(['bash', str(ROOT / 'codex-switch.sh'), 'deepseek'], env=env,
                            check=True, capture_output=True, text=True)
-            self.assertEqual(json.loads(plain.read_text())['payload']['model'], 'deepseek-flash')
+            rewritten_lines = plain.read_bytes().splitlines(keepends=True)
+            self.assertEqual(json.loads(rewritten_lines[1])['payload']['model'], 'deepseek-flash')
+            cutoff = json.loads(fork.read_text())['payload']['history_base']['end_byte_offset']
+            self.assertEqual(cutoff, len(b''.join(rewritten_lines[:2])))
             self.assertTrue(Path(str(compressed) + '.bak-switch').exists())
             with sqlite3.connect(home / 'state_5.sqlite') as db:
                 self.assertEqual(db.execute('select rollout_path from threads').fetchone()[0], str(plain))

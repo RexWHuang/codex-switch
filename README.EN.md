@@ -6,8 +6,9 @@
 > app-server test compacted each provider's history before switching, including
 > one run with approximately 36,000 characters of synthetic context. One offline
 > copy of an existing 91-record session retained all non-model content after
-> switching to DeepSeek. Desktop UI, near-limit sessions, and other existing
-> histories have not been verified.
+> switching to DeepSeek. A copied real fork with a compressed parent also loaded
+> its history via app-server after switching. Desktop UI, near-limit sessions,
+> and other existing histories have not been verified.
 > Do not run this against valuable history without a separate full backup of
 > `~/.codex`. Switching replaces the entire config and rewrites session history.
 > Never commit API keys to this public repository.
