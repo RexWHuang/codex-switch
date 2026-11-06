@@ -9,9 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Token Shark base URL corrected to the official public endpoint `https://llmv1.ahau.edu.cn/v1`**: the school's announcement, the platform manual and the integration guide all state "平台固定接口地址为 https://llmv1.ahau.edu.cn/v1". The address previously used (`http://llm.ahau.edu.cn:4000/v1`, taken from `/api/me/api-base-url/`) is the platform's **internal** gateway; students cannot reach it because the campus ACL drops the SYN, and the 80/81/8080 ports answer with a custom block page echoing the client IP — which looks like a dead service but is a network policy. The public host on 443 works (uvicorn + vLLM); `/v1/models`, `/v1/chat/completions` and `/v1/responses` all returned 200, and the Responses endpoint natively supports `tools` / `parallel_tool_calls`
+- **Model catalog generator now understands `max_input_tokens`**: Token Shark's `/v1/models` returns `max_input_tokens` rather than `context_window`, so the generated catalog had no context window
+- **Model catalog generator skips placeholder keys**: the switch template keeps a placeholder while the real key lives in the keychain or `~/.codex/config.toml`; sending the placeholder to `/models` produced a 401 that was hard to trace
+
 ### Added
 
-- **token_shark mode (campus LLM gateway)**: `./codex-switch.sh token_shark` (or double-click `切换到Token鲨.command`). Before switching it reads `codex-token-shark` from the macOS keychain, then runs a gateway preflight (`GET {base_url}/models`, requires HTTP 200 *and* a JSON body) and a protocol probe (`/responses` vs `/chat/completions`, which decides `wire_api`); on failure it aborts and leaves the current config completely untouched — an unreachable gateway is worse than an exhausted quota. The key only ever lives in the keychain, never in the repo or the template; it is injected into `config.toml` (mode 600) at switch time, and `model_catalog_json` is set automatically when `~/.codex/token-shark-models.json` exists. Session provider markers are repainted as `token_shark` through the generic provider-name logic
+- **token_shark mode (campus LLM gateway)**: `./codex-switch.sh token_shark` (or double-click `切换到Token鲨.command`). Before switching it reads `codex-token-shark` from the macOS keychain (falling back to an inline key in the config), then runs a gateway preflight (`GET {base_url}/models`, requires HTTP 200 *and* a JSON body) and a protocol probe (`/responses` vs `/chat/completions`, which decides `wire_api`); on failure it aborts and leaves the current config completely untouched — an unreachable gateway is worse than an exhausted quota. The key only ever lives in the keychain, never in the repo or the template; it is injected into `config.toml` (mode 600) at switch time, and `model_catalog_json` is set automatically when `~/.codex/token-shark-models.json` exists. Session provider markers are repainted as `token_shark` through the generic provider-name logic
+- **`CODEX_SWITCH_TOKEN_SHARK_BASE_URL`**: swap the gateway address without touching the repo template
 
 ### Fixed
 

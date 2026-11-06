@@ -11,10 +11,14 @@
 
 ### Added
 
-- **token_shark 模式（校园 LLM 网关）**：`./codex-switch.sh token_shark`（或双击 `切换到Token鲨.command`）。切换前从 macOS 钥匙串读 `codex-token-shark`，再依次做网关预检（`GET {base_url}/models`，要求 HTTP 200 且响应体是 JSON）与协议探测（`/responses` 还是 `/chat/completions`，据此决定 `wire_api`），预检不过就中止且原配置一个字都不动——网关不通比额度耗尽更糟。密钥只存钥匙串，不进仓库也不进模板，切换时才注入 `config.toml`（600 权限）；`~/.codex/token-shark-models.json` 存在时自动写入 `model_catalog_json`。会话 provider 标记按通用逻辑刷成 `token_shark`
+- **token_shark 模式（校园 LLM 网关）**：`./codex-switch.sh token_shark`（或双击 `切换到Token鲨.command`）。切换前从 macOS 钥匙串读 `codex-token-shark`（取不到时回退到配置里内联的真实密钥），再依次做网关预检（`GET {base_url}/models`，要求 HTTP 200 且响应体是 JSON）与协议探测（`/responses` 还是 `/chat/completions`，据此决定 `wire_api`），预检不过就中止且原配置一个字都不动——网关不通比额度耗尽更糟。密钥只存钥匙串，不进仓库也不进模板，切换时才注入 `config.toml`（600 权限）；`~/.codex/token-shark-models.json` 存在时自动写入 `model_catalog_json`。会话 provider 标记按通用逻辑刷成 `token_shark`
+- **`CODEX_SWITCH_TOKEN_SHARK_BASE_URL`**：临时换网关地址不必改仓库模板
 
 ### Fixed
 
+- **Token鲨 接口地址改为官方对外入口 `https://llmv1.ahau.edu.cn/v1`**：学校《开通通知》《大模型公共服务平台使用手册》《常用模型接入工具使用说明》三处一致写明「平台固定接口地址为 https://llmv1.ahau.edu.cn/v1」。此前用的 `http://llm.ahau.edu.cn:4000/v1` 取自平台接口 `/api/me/api-base-url/`，那是**平台后端内部**的网关地址，学生侧直连会被校园网准入策略丢包（TCP 握手无应答），在 80/81/8080 上则返回带 `Client IP` 的自定义拦截页，看着像服务挂了其实是网络策略。443 端口上的 `llmv1.ahau.edu.cn` 直连可用（uvicorn + vLLM），`/v1/models`、`/v1/chat/completions`、`/v1/responses` 均实测 200，Responses 端点原生支持 `tools` / `parallel_tool_calls`
+- **模型目录生成器支持 `max_input_tokens`**：Token鲨 的 `/v1/models` 返回的是 `max_input_tokens` 而不是 `context_window`，此前生成器取不到上下文长度，目录里 `context_window` 为空
+- **模型目录生成器跳过占位符密钥**：切换模板里留的是占位符，真密钥在钥匙串或 `~/.codex/config.toml` 里；生成器拿占位符去请求 `/models` 会得到 401，很难看出是哪一步错了
 - **切换时清理无效的 `[model_providers.X.auth]` 段**：Codex 的 model provider 根本没有 `auth` 字段，这种「用命令取密钥」的写法会被静默忽略（不报错），结果等于没有凭据、平台直接返回 401。脚本现在按行删掉整段（段里的 `args = [...]` 数组行不会被漏掉，漏掉会写出非法 TOML 让 Codex 起不来）
 
 ## [1.6.1] - 2026-10-22
