@@ -344,7 +344,8 @@ class TokenSharkTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             config = (home / 'config.toml').read_text()
             self.assertIn('base_url = "https://llm.ahau.edu.cn/v1"', config)
-            self.assertNotIn('4000', config)
+            # 生效的 base_url 不能再指向平台内部网关（注释里提到它是为了提醒别用）
+            self.assertNotRegex(config, r'^base_url\s*=\s*"[^"]*4000')
 
     def test_missing_keychain_entry_stops_before_changing_config(self):
         with tempfile.TemporaryDirectory() as temp:
