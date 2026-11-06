@@ -75,8 +75,20 @@ trap cleanup EXIT
 if [ "$MODE" = "token_shark" ]; then
   TS_KEY="$(security find-generic-password -a token-shark -s codex-token-shark -w 2>/dev/null || true)"
   if [ -z "$TS_KEY" ]; then
-    echo "❌ 钥匙串里没有 codex-token-shark，取不到 Token鲨 密钥；原配置保持不变。" >&2
-    exit 2
+    # 钥匙串没有就退回模板里内联的真实密钥（占位符不算）
+    TS_KEY="$(python3 - "$CONFIG" <<'PYEOF'
+import re, sys
+text = open(sys.argv[1], encoding='utf-8').read()
+m = re.search(r'^experimental_bearer_token\s*=\s*"(sk-[^"\n]+)"', text, re.M)
+print(m.group(1) if m else '')
+PYEOF
+)"
+    if [ -n "$TS_KEY" ]; then
+      echo "⚠️  钥匙串里没有 codex-token-shark，改用配置文件里内联的密钥。"
+    else
+      echo "❌ 钥匙串里没有 codex-token-shark，配置里也没有内联密钥；原配置保持不变。" >&2
+      exit 2
+    fi
   fi
   RENDERED="$(mktemp "${TMPDIR:-/tmp}/codex-switch-token-shark.XXXXXX")"
   chmod 600 "$RENDERED"

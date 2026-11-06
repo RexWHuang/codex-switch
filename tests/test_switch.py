@@ -346,6 +346,22 @@ class TokenSharkTest(unittest.TestCase):
             self.assertIn('钥匙串', result.stderr)
             self.assertEqual((home / 'config.toml').read_text(), 'model = "original"\n')
 
+    def test_inline_key_is_used_when_keychain_is_empty(self):
+        """钥匙串没有密钥时，回退到配置文件里内联的真实密钥（占位符不算）。"""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home, env = self._prepare(root)
+            (root / 'bin' / 'security').write_text('#!/bin/sh\nexit 1\n')
+            (root / 'bin' / 'security').chmod(0o755)
+            template = (home / 'switch-config-token-shark.toml').read_text().replace(
+                'TOKEN_SHARK_API_KEY', 'sk-inline-key')
+            (home / 'switch-config-token-shark.toml').write_text(template)
+            result = subprocess.run(['bash', str(ROOT / 'codex-switch.sh'), 'token_shark'],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('experimental_bearer_token = "sk-inline-key"',
+                          (home / 'config.toml').read_text())
+
     def test_auth_section_is_stripped(self):
         """[model_providers.X.auth] 不是 Codex 支持的字段，留着等于没有凭据。
 

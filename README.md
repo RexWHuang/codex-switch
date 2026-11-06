@@ -82,7 +82,7 @@ Token鲨 平台的 OpenAI 兼容网关（`http://llm.ahau.edu.cn:4000/v1`）只�
 
    | 步骤 | 失败时的表现 |
    | --- | --- |
-   | 从钥匙串取 `codex-token-shark` | `钥匙串里没有 codex-token-shark`，退出码 2 |
+   | 从钥匙串取 `codex-token-shark`（取不到时回退到配置里内联的真实密钥） | `钥匙串里没有 codex-token-shark`，退出码 2 |
    | 预检 `GET {base_url}/models`（要求 HTTP 200 **且**响应体是 JSON） | `网关预检未通过（HTTP 000）`，退出码 3 |
    | 探测 `/responses` 与 `/chat/completions`，据此决定 `wire_api` | 两者都不存在则退出码 4 |
    | 注入密钥与模型目录，把会话 provider 标记刷成 `token_shark` | — |
