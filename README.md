@@ -128,8 +128,14 @@ OpenAI 官方 API 认这两种；很多第三方网关（Token鲨 背后的 lite
 
    ```bash
    python3 gen-model-catalog.py --provider token_shark \
-       --config ~/.codex/config.toml --out ~/.codex/token-shark-models.json
+       --config ~/.codex/config.toml --out ~/.codex/token-shark-models.json \
+       --efforts low,medium,high,xhigh
    ```
+
+   `--efforts` 控制界面上可选的推理档位。Token鲨 的 `/v1/models` 不返回 effort 元数据，
+   生成器默认只写 `high` 一档（界面选不出别的档）；显式传 `--efforts` 就能在右下角
+   档位选择器里看到多档。档位值会作为 `reasoning.effort` 原样发给网关，网关若不认
+   会自动忽略（实测 `high` 请求 200 通过）。
 
 2. **清洗存量**：把历史里的 `custom_tool_call` / `custom_tool_call_output` 改写成标准 `function_call` / `function_call_output`（`input` → `arguments`）：
 

@@ -112,13 +112,14 @@ EFFORT_DESCRIPTIONS = {
 
 
 def build_entry(template, spec, default_effort='high',
-                shell_type='shell_command', apply_patch_tool_type=None):
+                shell_type='shell_command', apply_patch_tool_type=None,
+                efforts=None):
     entry = json.loads(json.dumps(template))
     entry['slug'] = spec['id']
     entry['display_name'] = spec.get('name') or spec['id']
     entry['description'] = spec.get('description') or f"{entry['display_name']} via third-party API"
     effort = spec.get('effort') or {}
-    levels = effort.get('supported_levels') or [default_effort]
+    levels = effort.get('supported_levels') or efforts or [default_effort]
     entry['default_reasoning_level'] = effort.get('default_level') or default_effort
     entry['supported_reasoning_levels'] = [
         {'effort': lv, 'description': EFFORT_DESCRIPTIONS.get(lv, lv)} for lv in levels
@@ -181,7 +182,12 @@ def main():
                              'Codex 0.168 只认 freeform，写了就会注册 custom 类型工具，'
                              '历史里留下 custom_tool_call，第三方网关回放时 400。'
                              '只有网关明确支持 custom 工具时才传 freeform')
+    parser.add_argument('--efforts', default=None,
+                        help='网关未返回 effort 元数据时，界面上可选的推理档位，'
+                             '逗号分隔（如 low,medium,high）。默认只给 high 一档；'
+                             '想在图省事的国产模型上开放更多档位就显式传')
     args = parser.parse_args()
+    efforts = [e.strip() for e in args.efforts.split(',') if e.strip()] if args.efforts else None
 
     text = ''
     if args.config and os.path.exists(args.config):
@@ -209,7 +215,8 @@ def main():
 
     catalog = {'models': [build_entry(template, s,
                                       shell_type=args.shell_type,
-                                      apply_patch_tool_type=args.apply_patch_tool_type)
+                                      apply_patch_tool_type=args.apply_patch_tool_type,
+                                      efforts=efforts)
                           for s in specs]}
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or '.', exist_ok=True)
     with open(args.out, 'w', encoding='utf-8') as fh:
