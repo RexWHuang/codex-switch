@@ -92,10 +92,10 @@ PYEOF
   fi
   RENDERED="$(mktemp "${TMPDIR:-/tmp}/codex-switch-token-shark.XXXXXX")"
   chmod 600 "$RENDERED"
-  if ! TS_WIRE="$(python3 - "$CONFIG" "$RENDERED" "$CODEX_HOME/token-shark-models.json" "$TS_KEY" <<'PYEOF'
+  if ! TS_WIRE="$(python3 - "$CONFIG" "$RENDERED" "$CODEX_HOME/token-shark-models.json" "$TS_KEY" "${CODEX_SWITCH_TOKEN_SHARK_BASE_URL:-}" <<'PYEOF'
 import json, os, re, subprocess, sys, tempfile
 
-config_path, out_path, catalog_path, key = sys.argv[1:5]
+config_path, out_path, catalog_path, key, base_override = sys.argv[1:6]
 
 
 def fail(message):
@@ -149,9 +149,10 @@ if not span:
     fail(f'配置里没有 [model_providers.{provider}] 段')
 block = span.group(1)
 bm = re.search(r'^base_url\s*=\s*"([^"\n]+)"', block, re.M)
-if not bm:
+if not bm and not base_override:
     fail('读不到 base_url')
-base = bm.group(1).rstrip('/')
+# CODEX_SWITCH_TOKEN_SHARK_BASE_URL 优先：平台改用 443 反代后不必改仓库模板
+base = (base_override or bm.group(1)).rstrip('/')
 mm = re.search(r'^model\s*=\s*"([^"\n]+)"', text, re.M)
 model = mm.group(1) if mm else ''
 
@@ -217,6 +218,7 @@ def set_provider_value(text, provider, field, value):
 
 text = set_provider_value(text, provider, 'experimental_bearer_token', key)
 text = set_provider_value(text, provider, 'wire_api', wire)
+text = set_provider_value(text, provider, 'base_url', base)
 
 if os.path.exists(catalog_path):
     if re.search(r'^\s*model_catalog_json\s*=', text, re.M):

@@ -102,7 +102,10 @@ Token Shark's OpenAI-compatible gateway (`http://llm.ahau.edu.cn:4000/v1`) is on
    | Probe `/responses` and `/chat/completions` to pick `wire_api` | exit code 4 if neither exists |
    | Inject key + model catalog, repaint session provider markers as `token_shark` | — |
 
-   After a successful preflight the key is written into `~/.codex/config.toml` (mode 600), and `model_catalog_json` is set automatically when `~/.codex/token-shark-models.json` exists.
+   Precheck passes → the key is written into `~/.codex/config.toml` (mode 600), and `model_catalog_json` is set automatically when `~/.codex/token-shark-models.json` exists.
+
+   If the platform moves the gateway behind a 443 reverse proxy, override the address without touching the repo template:
+   `CODEX_SWITCH_TOKEN_SHARK_BASE_URL=https://llm.ahau.edu.cn/v1 ./codex-switch.sh token_shark`
 
 **Two traps worth knowing**
 

@@ -98,6 +98,12 @@ Token鲨 平台的 OpenAI 兼容网关（`http://llm.ahau.edu.cn:4000/v1`）只�
 
   预检通过后脚本会自动选 `wire_api`：网关有 `/responses` 就用 `responses`（Codex 0.166+ 的原生协议），只有 `/chat/completions` 就退到 `chat`。
 
+  平台若改用 443 反代，不必改仓库模板，用环境变量覆盖地址即可：
+
+  ```bash
+  CODEX_SWITCH_TOKEN_SHARK_BASE_URL=https://llm.ahau.edu.cn/v1 ./codex-switch.sh token_shark
+  ```
+
 ## 第三方模式的浏览器控制（可选）
 
 Codex 的内嵌浏览器 / Computer Use 是 OpenAI 云端服务，第三方模式下必然报 `Codex auth token is unavailable`，无法使用。如果你安装了 [Kimi WebBridge](https://www.kimi.com/zh-cn/features/webbridge)（Kimi 官方浏览器插件，本地守护进程在 127.0.0.1:10086），本仓库提供两种桥接方式让 Codex 在第三方模式下也能操作用户真实浏览器（自带登录态）：
@@ -181,6 +187,7 @@ python3 gen-model-catalog.py --provider custom \
 | `CODEX_SWITCH_APP` | `ChatGPT` | Codex 桌面应用名 |
 | `CODEX_SWITCH_CLI` | `/Applications/ChatGPT.app/Contents/Resources/codex` | CLI 路径（用于打印版本） |
 | `CODEX_SWITCH_LAUNCHD_LABEL` | `com.codexswitch.codeproxy-kimi` | Kimi 路由的 launchd Label |
+| `CODEX_SWITCH_TOKEN_SHARK_BASE_URL` | 取配置里的 `base_url` | 覆盖 Token鲨 网关地址（平台改用 443 反代后不必改仓库模板，例如 `https://llm.ahau.edu.cn/v1`） |
 
 ## 文件清单
 

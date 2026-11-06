@@ -333,6 +333,19 @@ class TokenSharkTest(unittest.TestCase):
             self.assertEqual((home / 'config.toml').read_text(), 'model = "original"\n')
             self.assertFalse((home / 'config.toml.bak-switch').exists())
 
+    def test_base_url_can_be_overridden_by_env(self):
+        """平台改用 443 反代后，用环境变量换地址，不必改仓库模板。"""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home, env = self._prepare(root)
+            env['CODEX_SWITCH_TOKEN_SHARK_BASE_URL'] = 'https://llm.ahau.edu.cn/v1'
+            result = subprocess.run(['bash', str(ROOT / 'codex-switch.sh'), 'token_shark'],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            config = (home / 'config.toml').read_text()
+            self.assertIn('base_url = "https://llm.ahau.edu.cn/v1"', config)
+            self.assertNotIn('4000', config)
+
     def test_missing_keychain_entry_stops_before_changing_config(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
