@@ -69,9 +69,9 @@ chmod +x codex-switch.sh *.command codeproxy-kimi.sh
 
 ## Token鲨（校园 LLM 网关）模式
 
-Token鲨 平台的 OpenAI 兼容网关（`http://llm.ahau.edu.cn:4000/v1`）只对平台内网/校园网出口 IP 开放。它和 DeepSeek/Kimi 的最大区别是：**网关地址不是写死的**，要以平台自己返回的为准。
+Token鲨 平台的 OpenAI 兼容网关。**对外接入地址是 `https://llmv1.ahau.edu.cn/v1`**（443 端口，校园网放行，直接可用）——学校《开通通知》《大模型公共服务平台使用手册》《常用模型接入工具使用说明》三处一致写明「平台固定接口地址为 https://llmv1.ahau.edu.cn/v1」，调用用申请的 API Key 鉴权，模型 ID 即模型名称。
 
-1. 确认网关地址：登录 Token鲨 网页后调用 `GET https://llm.ahau.edu.cn/api/me/api-base-url/`（头 `Authorization: Bearer <网页登录 token>`，token 在浏览器 localStorage 的 `token` 键），返回的 `data.base_url` / `data.chat_completions_url` / `data.models_url` 就是权威地址。把它写进 `config-token-shark.toml` 的 `base_url`。
+1. 接口地址写在 `config-token-shark.toml` 的 `base_url`。**不要用平台接口 `GET /api/me/api-base-url/` 返回的那个地址**：它给的是 `http://llm.ahau.edu.cn:4000/v1`，那是平台**后端内部**的网关地址，学生侧直连会被校园网准入策略丢包（TCP 握手无应答），照抄它必然连不通。
 2. 密钥放钥匙串（不进仓库、不进模板文件）：
 
    ```bash
@@ -92,16 +92,14 @@ Token鲨 平台的 OpenAI 兼容网关（`http://llm.ahau.edu.cn:4000/v1`）只�
 **两个必须知道的坑**
 
 - **Codex 的 model provider 没有 `auth` 字段**。`[model_providers.token_shark.auth]` 这种「用命令取密钥」的写法会被**静默忽略**（不报错），结果等于没有凭据，平台直接返回 401。脚本切换时会自动删掉这类段。认证只能用 `experimental_bearer_token = "sk-..."`（内联，桌面端 launchd 环境拿不到 shell 变量，`env_key` 在桌面端不可用）。
-- **网关只对特定出口开放**。校园网 ACL 会把 `4000` 端口直接丢包（SYN 无响应），在 80/81/8080 上返回「Server Unavailable」拦截页，看起来像服务挂了其实是网络策略。实测三条路都堵死：本机直连、经校园网 HTTP 正向代理（只放行 80）、Clash 出口。**这是平台侧的网络策略，客户端无法绕过**，需要平台管理员处理，二选一即可：
-  1. 在 `.93` 主机的 nginx/Caddy 上加一条 `location /v1/ { proxy_pass http://127.0.0.1:4000; }`，客户端改用 `https://llm.ahau.edu.cn/v1`（443 已被放行，不需要动防火墙）；
-  2. 或把 `4000` 放行到校园网段/把出口 IP 加进白名单。
+- **别把内部网关地址当对外入口**。`llm.ahau.edu.cn:4000` 只在平台内网可达：校园网 ACL 会把它的 SYN 直接丢包，在 80/81/8080 上则返回一张带 `Client IP` 的「Server Unavailable」拦截页，看着像服务挂了，其实是网络策略。**对策不是找管理员开端口，而是换域名**——用官方的 `https://llmv1.ahau.edu.cn/v1`。
 
   预检通过后脚本会自动选 `wire_api`：网关有 `/responses` 就用 `responses`（Codex 0.166+ 的原生协议），只有 `/chat/completions` 就退到 `chat`。
 
-  平台若改用 443 反代，不必改仓库模板，用环境变量覆盖地址即可：
+  地址临时换一处（比如平台又改了域名），不必改仓库模板，用环境变量覆盖即可：
 
   ```bash
-  CODEX_SWITCH_TOKEN_SHARK_BASE_URL=https://llm.ahau.edu.cn/v1 ./codex-switch.sh token_shark
+  CODEX_SWITCH_TOKEN_SHARK_BASE_URL=https://llmv1.ahau.edu.cn/v1 ./codex-switch.sh token_shark
   ```
 
 ## 第三方模式的浏览器控制（可选）
@@ -168,7 +166,7 @@ python3 gen-model-catalog.py --provider custom \
 | kimi 模式报 `not a valid moonshot flavored json schema` | 配置绕过了垫片（8788）直连了 codeproxy（8787），检查 `base_url` |
 | kimi 模式报 `the message at position N with role 'assistant' must not be empty`（常伴「压缩已中断」） | 历史里有完全空的 reasoning/assistant 条目，codeproxy 转换出裸 assistant 被 Kimi 拒收。v1.6.1 起垫片自动清理；还在报说明垫片是旧版，重跑切换脚本同步新版垫片即可（会话文件本身不用动） |
 | kimi 模式报 tool_search 不支持 | 配置走了直连而非路由，确认 `~/.codex/config.toml` 的 `base_url = "http://127.0.0.1:8787/v1"` |
-| token_shark 模式报 `网关预检未通过（HTTP 000）` | 网关端口不可达，多半是校园网 ACL 把 `4000` 丢包了。验证：`nc -vz llm.ahau.edu.cn 4000`（超时=被拦，refused=没监听）。这是平台侧网络策略，客户端绕不过去，需要管理员在 443 上反代 `/v1/` 或放行 4000，详见「Token鲨（校园 LLM 网关）模式」一节 |
+| token_shark 模式报 `网关预检未通过（HTTP 000）` | `base_url` 填错了，多半填成了平台内部网关 `http://llm.ahau.edu.cn:4000/v1`（校园网 ACL 会丢包）。对外入口是 `https://llmv1.ahau.edu.cn/v1`，改对即可；排查用 `curl -sS https://llmv1.ahau.edu.cn/v1/models -H "Authorization: Bearer <sk- 密钥>"`，应返回模型列表 JSON |
 | token_shark 模式报 401 | 密钥没注入或已失效。确认钥匙串里有 `codex-token-shark`（`security find-generic-password -a token-shark -s codex-token-shark -w`），并检查 `~/.codex/config.toml` 的 `[model_providers.token_shark]` 段里有 `experimental_bearer_token` |
 | token_shark 模式报 401 但配置里明明有密钥 | 配置里写了 `[model_providers.token_shark.auth]` 这种「命令式取密钥」的段——Codex 没有这个字段，会被静默忽略，等于没有凭据。删掉该段，改用 `experimental_bearer_token` |
 | 第三方模式下浏览器控制报 `Codex auth token is unavailable` | 内嵌浏览器/Computer Use 是 OpenAI 云端服务，第三方模式必然不可用。用「第三方模式的浏览器控制」一节的 WebBridge 桥接方案 |

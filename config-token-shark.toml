@@ -1,8 +1,11 @@
 # Token鲨（校园 LLM 网关）直连模式配置模板
 #
-# 网关地址以平台自己返回的为准：登录 Token鲨 网页后调用
-#   GET https://llm.ahau.edu.cn/api/me/api-base-url/   （头 Authorization: Bearer <网页登录 token>）
-# 返回 data.base_url / data.chat_completions_url / data.models_url。
+# 网关地址以学校官方通知为准：「平台固定接口地址为 https://llmv1.ahau.edu.cn/v1」
+# （《大模型公共服务平台使用手册》《常用模型接入工具使用说明》与开通通知三处一致）。
+# 登录 Token鲨 网页后也可用 GET https://llm.ahau.edu.cn/api/me/api-base-url/ 自查。
+#
+# 注意：llm.ahau.edu.cn:4000 是平台后端内部用的网关地址，只有平台服务器自己能连，
+# 学生侧直连会被校园网准入策略丢包（TCP 握手无应答）。对外要用 llmv1.ahau.edu.cn。
 #
 # provider 名称（model_provider）可以自定义，但必须与 [model_providers.<同名>] 段一致。
 # 切换脚本会把这个名字同步到所有历史会话的标记里；名字对不上时桌面端会报
@@ -10,8 +13,8 @@
 
 model_provider = "token_shark"
 model = "GLM-5.3-Flash-SS"          # 或 Qwen3.8-Flash-Next-SS / Deepseek-V4.1-Flash-SS
-# 平台侧单次上下文上限 128000（管理员可配），不要按模型原厂 1M 填。
-model_context_window = 128000
+# 平台 /v1/models 返回的 max_input_tokens 是 1000000，按此填。
+model_context_window = 1000000
 disable_response_storage = true
 approval_policy = "on-request"
 sandbox_mode = "workspace-write"

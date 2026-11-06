@@ -31,6 +31,18 @@ import sys
 import urllib.request
 
 
+def is_placeholder(value):
+    """占位符不是真密钥（模板里留着让人替换的那种）。
+
+    切换模板里的密钥位是占位符，真密钥在钥匙串或 ~/.codex/config.toml 里；
+    直接拿占位符去请求会得到 401，很难看出是哪一步错了。
+    """
+    if not value:
+        return True
+    upper = value.upper()
+    return 'YOUR_' in upper or '_API_KEY' in upper or upper.endswith('_KEY') and 'TOKEN_SHARK' in upper
+
+
 def read_api_key(config_path, provider):
     """从切换配置里取该 provider 的密钥。
 
@@ -47,7 +59,7 @@ def read_api_key(config_path, provider):
         if name != provider:
             continue
         m = re.search(r'^experimental_bearer_token\s*=\s*"([^"]+)"', body, re.M)
-        if m:
+        if m and not is_placeholder(m.group(1)):
             return m.group(1)
         m = re.search(r'^env_key\s*=\s*"([^"]+)"', body, re.M)
         if m:
@@ -57,7 +69,7 @@ def read_api_key(config_path, provider):
             break  # 环境变量没设，交给下面的兜底逻辑
     for name, body in blocks:
         m = re.search(r'^experimental_bearer_token\s*=\s*"([^"\n]+)"', body, re.M)
-        if m and 'YOUR_' not in m.group(1):
+        if m and not is_placeholder(m.group(1)):
             return m.group(1)
     return os.environ.get(f'{provider.upper()}_API_KEY', '')
 
@@ -111,6 +123,9 @@ def build_entry(template, spec, default_effort='high'):
         {'effort': lv, 'description': EFFORT_DESCRIPTIONS.get(lv, lv)} for lv in levels
     ]
     context = spec.get('context_window')
+    if not context:
+        # 某些网关（如 Token鲨 /v1/models）返回的是 max_input_tokens
+        context = spec.get('max_input_tokens') or spec.get('max_context_window')
     if context:
         entry['context_window'] = context
         entry['max_context_window'] = context
